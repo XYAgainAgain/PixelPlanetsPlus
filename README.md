@@ -2,7 +2,7 @@
 
 ***A procedural pixel-art orrery: adorable, chunky, dithered lil worlds that spin forever, right in your browser.***
 
-<p align="center"><em>Coming soon(ish) to <a href="https://xyagainagain.github.io/PixelPlanetsPlus/">a GitHub Pages site near you!</a></em></p>
+<p align="center"><em>Check it out at <a href="https://pixelplanetsplus.app/">the cute lil site!</a></em></p>
 
 ---
 
@@ -40,15 +40,13 @@ Here's da plan: You land on a fully procedural solar system, planets tumbling & 
 
 ## Current Status
 
-Full rewrite in progress! The actual state of things right meow: **The port fork still works!** [`/legacy/`](public/legacy/) loads the committed bundle as-is; nine planet types, dat.gui panel and all. It runs on Three.js r139 & WebGL, which is exactly what I'm here to fix.
-
-**The modern version is being built RIGHT NOW WHEN YOU READ THIS,** starting with a single planet ported end-to-end to prove the whole pipeline will do the thing before more happens. Workin' on it!
+Full rewrite in progress! The actual state of things right meow: **The new version is being built RIGHT NOW AT THE VERY MOMENT YOU READ THIS,** starting with a single planet ported end-to-end to prove the whole pipeline will do the thing before more happens. Workin' on it, honest!
 
 ## Flight Plan
 
 No dates or deadlines, only destinations!
 
-- All 9 planet types ported to [TSL](https://github.com/mrdoob/three.js/wiki/Three.js-Shading-Language) on WebGPU with auto WebGL2 fallback, pixel-faithful to the OGs
+- All planet types ported to [TSL](https://github.com/mrdoob/three.js/wiki/Three.js-Shading-Language) on WebGPU with auto WebGL2 fallback, pixel-faithful to the OGs
 - Seeded, deterministic *everything* coz shareable links are the whole point! Might do QR codes too!
 - The solar system view with planets on Keplerian-ish orbits around a nice star :')
 - The PixelSpace BG, galaxy, and black hole switched on, plus the upcoming pulsar!
@@ -64,7 +62,7 @@ No dates or deadlines, only destinations!
 
 ## Got Feedback?
 
-Thoughts, wishes, bugs, or cursed seeds to report? Open an [Issue](../../issues) please! Feedback is welcome! If this project delights you and you're feeling generous, I gratefully accept fiscally responsible tips at my [Ko-fi](https://ko-fi.com/xyagain).
+Thoughts, wishes, bugs, or cursed seeds to report? Open an [Issue](../../issues), please! Feedback is welcome! If this project delights you and you're feeling generous, I gratefully accept fiscally responsible tips at my [Ko-fi](https://ko-fi.com/xyagain).
 
 ## On the Shoulders of Stellar Giants
 
