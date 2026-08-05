@@ -1,23 +1,25 @@
 {
-  "name": "planet",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
-  "scripts": {
-    "build": "esbuild index.js --minify  --bundle --outfile=out.js",
-    "generate:server-side": "node server-side-example.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
+  "name": "pixelplanetsplus",
+  "version": "0.1.0",
+  "description": "Procedural pixel-art solar system generator",
   "type": "module",
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "license": "MIT",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "preview": "vite preview",
+    "pg": "tailwindcss -i src/app.css -o css/pg-tailwind.css --watch"
+  },
   "dependencies": {
-    "canvas": "^2.9.1",
-    "dat.gui": "^0.7.9",
-    "esbuild": "^0.14.31",
-    "get-pixels": "^3.3.3",
-    "gl": "^5.0.0",
-    "three": "^0.139.2"
+    "three": "^0.185.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.3.3",
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/three": "^0.185.4",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.0"
   }
 }
