@@ -55,7 +55,7 @@ export const createStarFlaresLayer = (v: LayerValues, u: StarFlaresUniforms): Me
         const raw = planetUv().toVar()
         const pixels = u.planetPixels.mul(pixelScale)
         const pixelized = pixelize(raw, pixels).toVar()
-        const dith = ditherCheck(raw, pixelized, pixels).toVar()
+        const dith = ditherCheck(pixelized, raw, pixels).toVar()
         pixelized.assign(rotateUv(pixelized, u.rotation.add(rotationOffset)))
         const uv = vec2(pixelized).toVar()
         const angle = atan(uv.x.sub(0.5), uv.y.sub(0.5)).mul(0.4).toVar()

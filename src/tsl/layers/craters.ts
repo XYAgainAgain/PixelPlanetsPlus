@@ -11,12 +11,11 @@ export interface CratersSharedUniforms {
     rotation: UF
     lightOrigin: UV2
     seed: UF
+    pixels: UF
 }
 
 export const createCratersUniforms = (v: LayerValues, shared: CratersSharedUniforms) => ({
     ...shared,
-    // Own pixels uniform: the scene tunes craters coarser than the ground (87.419 vs 100)
-    pixels: uniform(v.pixels),
     time: uniform(0.0),
     lightBorder: uniform(v.lightBorder ?? 0.465),
     colors: v.colors.map((c) => uniform(new Vector4(...c))),
@@ -28,6 +27,8 @@ export const createCratersLayer = (v: LayerValues, u: CratersUniforms): Mesh => 
     const size = float(v.size ?? 5.0)
     const timeSpeed = float(v.timeSpeed ?? 0.001)
     const rotationOffset = v.rotationOffset ?? 0.0
+    // Preserve each recipe's crater coarseness relative to the planet's base density.
+    const pixelScale = v.pixels / 100
 
     // Craters' own circleNoise variant: smoothstep(0.9r, r, m), not the clouds form in common.ts
     const circleNoise = Fn(([uvIn, seed, sz]: [NV2, NF, NF]) => {
@@ -53,7 +54,7 @@ export const createCratersLayer = (v: LayerValues, u: CratersUniforms): Mesh => 
     const fragment = Fn(() => {
         // Pre-mutation reads frozen with .toVar(); see planetUnder.ts for the TSL gotcha
         const raw = planetUv().toVar()
-        const uv = pixelize(raw, u.pixels).toVar()
+        const uv = pixelize(raw, u.pixels.mul(pixelScale)).toVar()
         const dLight = distance(uv, u.lightOrigin).toVar()
         const alpha = circleCutout(uv).toVar()
 

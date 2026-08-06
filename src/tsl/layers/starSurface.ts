@@ -26,16 +26,16 @@ export type StarSurfaceUniforms = ReturnType<typeof createStarSurfaceUniforms>
 const makeCells = (tiles: number) => Fn(([pIn, numCells]: [NV2, NF]) => {
     const p = pIn.mul(numCells)
     const d = float(1.0e10).toVar()
-    Loop(3, ({ i: xo }) => {
-        Loop(3, ({ i: yo }) => {
-            const offset = vec2(float(xo).sub(1.0), float(yo).sub(1.0))
-            const tp = floor(p).add(offset).toVar()
-            const wrapped = mod(tp, numCells.div(tiles)).toVar()
-            const r = float(523.0).mul(sin(dot(wrapped, vec2(53.3158, 43.6143))))
-            const hash = vec2(fract(r.mul(15.32354)), fract(r.mul(17.25865)))
-            tp.assign(p.sub(tp).sub(hash))
-            d.assign(min(d, dot(tp, tp)))
-        })
+    // One flat loop over the 3×3 neighborhood: nested Loop() calls both name their counter
+    // `i`, so the inner shadowed the outer and the scan collapsed to the diagonal (grid bug).
+    Loop(9, ({ i }) => {
+        const offset = vec2(float(i.div(3)).sub(1.0), float(i.mod(3)).sub(1.0))
+        const tp = floor(p).add(offset).toVar()
+        const wrapped = mod(tp, numCells.div(tiles)).toVar()
+        const r = float(523.0).mul(sin(dot(wrapped, vec2(53.3158, 43.6143))))
+        const hash = vec2(fract(r.mul(15.32354)), fract(r.mul(17.25865)))
+        tp.assign(p.sub(tp).sub(hash))
+        d.assign(min(d, dot(tp, tp)))
     })
     return sqrt(d)
 })
@@ -50,7 +50,7 @@ export const createStarSurfaceLayer = (v: LayerValues, u: StarSurfaceUniforms): 
         const raw = planetUv().toVar()
         const uv = pixelize(raw, u.pixels).toVar()
         const alpha = circleCutout(uv).toVar()
-        const dith = ditherCheck(raw, uv, u.pixels).toVar()
+        const dith = ditherCheck(uv, raw, u.pixels).toVar()
 
         uv.assign(rotateUv(uv, u.rotation.add(rotationOffset)))
         uv.assign(spherify(uv))

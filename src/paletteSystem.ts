@@ -63,17 +63,17 @@ const generateForType = (type: string, rng: () => number): Color[] => {
                 generated[1]!.lightened((1 - i / 3) * 0.4).darkened(i / 4))
             return [...water, ...land, ...clouds, ...atmosphere]
         }
-        case 'No atmosphere': {
+        case 'Barren': {
             const colors = groundColors(generateColorscheme(count(rng, 3, 2), range(rng, 0.3, 0.6), 0.7, rng))
             return [...colors, colors[1]!, colors[2]!]
         }
-        case 'Gas giant 1': {
+        case 'Gas Giant': {
             const generated = generateColorscheme(count(rng, 8, 4), range(rng, 0.3, 0.8), 1, rng)
             const back = generated.slice(0, 4).map((color, i) => color.darkened(i / 6).darkened(0.7))
             const front = generated.slice(4, 8).map((color, i) => color.darkened(i / 4).lightened((1 - i / 4) * 0.5))
             return [...back, ...front]
         }
-        case 'Gas giant 2': {
+        case 'Ringed Gas Giant': {
             const generated = generateColorscheme(count(rng, 6, 4), range(rng, 0.3, 0.55), 1.4, rng)
             const colors = generated.slice(0, 6).map((color, i) => color.darkened(i / 7).lightened((1 - i / 6) * 0.3))
             return [...colors, ...colors]
@@ -100,7 +100,7 @@ const generateForType = (type: string, rng: () => number): Color[] => {
             const generated = generateColorscheme(6, range(rng, 0.5, 0.8), 1.4, rng)
             return ramp(generated, 7, 0.6)
         }
-        case 'Star': {
+        case 'Standard Star': {
             const generated = generateColorscheme(4, range(rng, 0.2, 0.4), 2, rng)
             const colors = ramp(generated, 4 / 0.9, 0.8)
             colors[0] = colors[0]!.lightened(0.8)

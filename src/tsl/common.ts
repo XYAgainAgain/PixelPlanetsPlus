@@ -1,6 +1,6 @@
 import {
-    Fn, Loop, float, vec2, floor, fract, sin, dot, mix, mod, sqrt, step,
-    length, smoothstep, cos, min, positionGeometry,
+    Fn, Loop, abs, dFdx, float, vec2, floor, fract, sin, dot, mix, mod, sqrt, step,
+    length, smoothstep, cos, min, positionGeometry, screenCoordinate, select,
 } from 'three/tsl'
 import type { Node, UniformNode, Vector2 as V2, Vector4 as V4 } from 'three/webgpu'
 
@@ -100,9 +100,14 @@ export const makeCircleNoise = (spec: NoiseSpec) => {
     })
 }
 
-/* True on the checkerboard texel, the signature dither at every light-band boundary */
-export const ditherCheck = Fn(([uvPixel, uvReal, pixels]: [NV2, NV2, NF]) => {
-    return mod(uvPixel.x.add(uvReal.y), float(2.0).div(pixels)).lessThanEqual(float(1.0).div(pixels))
+/* The signature checker dither, on integer texel indices (Godot's raw-x form beats against
+   the fragment grid); undersampled texels fall back to fragment parity so it never moirés. */
+export const ditherCheck = Fn(([_uvPixel, uvReal, pixels]: [NV2, NV2, NF]) => {
+    const texelsPerFrag = abs(dFdx(uvReal.x)).mul(pixels)
+    const texelIndex = floor(uvReal.mul(pixels))
+    const texel = mod(texelIndex.x.add(texelIndex.y), 2.0).lessThan(0.5)
+    const frag = mod(floor(screenCoordinate.x).add(floor(screenCoordinate.y)), 2.0).lessThan(0.5)
+    return select(texelsPerFrag.greaterThan(0.45), frag, texel)
 })
 
 export const rotateUv = Fn(([coord, angle]: [NV2, NF]) => {

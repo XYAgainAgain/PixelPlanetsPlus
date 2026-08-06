@@ -65,13 +65,13 @@ export interface LayerValues {
 }
 
 export interface PlanetValues {
-    // GUI.gd:19–32 canonical label
+    // Derived from GUI.gd:19–32 labels; now project display strings used as registry and palette keys.
     name: string
     scene: string
     relativeScale: number
     guiZoom: number
     lightDrag: boolean
-    // Layer node names whose should_dither the dither toggle writes (empty on Gas giant 1)
+    // Layer node names whose should_dither the dither toggle writes (empty on Gas Giant)
     ditherLayers: readonly string[]
     // Empty when a one-layer body has no useful visibility toggle.
     layerMenu?: readonly number[]
@@ -183,7 +183,7 @@ export const PLANETS = {
         ],
     },
     noAtmosphere: {
-        name: 'No atmosphere',
+        name: 'Barren',
         scene: 'NoAtmosphere/NoAtmosphere.tscn',
         relativeScale: 1.0,
         guiZoom: 1.0,
@@ -214,7 +214,7 @@ export const PLANETS = {
         ],
     },
     gasGiant1: {
-        name: 'Gas giant 1',
+        name: 'Gas Giant',
         scene: 'GasPlanet/GasPlanet.tscn',
         relativeScale: 1.0,
         guiZoom: 1.0,
@@ -250,7 +250,7 @@ export const PLANETS = {
         ],
     },
     gasGiant2: {
-        name: 'Gas giant 2',
+        name: 'Ringed Gas Giant',
         scene: 'GasPlanetLayers/GasPlanetLayers.tscn',
         relativeScale: 3.0,
         guiZoom: 2.5,
@@ -456,7 +456,7 @@ export const PLANETS = {
         ],
     },
     star: {
-        name: 'Star',
+        name: 'Standard Star',
         scene: 'Star/Star.tscn',
         relativeScale: 2.0,
         guiZoom: 2.0,

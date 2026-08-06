@@ -26,6 +26,7 @@ const integer = (rng: Rng, min: number, max: number): number =>
 
 interface StarFrame {
     image: HTMLCanvasElement
+    brightImage: HTMLCanvasElement
 }
 
 const createFrames = (normal: HTMLImageElement, special: HTMLImageElement): Map<string, StarFrame> => {
@@ -51,7 +52,21 @@ const createFrames = (normal: HTMLImageElement, special: HTMLImageElement): Map<
                 context.globalCompositeOperation = 'destination-in'
                 context.drawImage(source, frame * (isSpecial ? 25 : 9), 0, sourceWidth, sourceHeight,
                     0, 0, canvas.width, canvas.height)
-                frames.set(`${Number(isSpecial)}:${frame}:${color}`, { image: canvas })
+                const brightCanvas = document.createElement('canvas')
+                brightCanvas.width = canvas.width
+                brightCanvas.height = canvas.height
+                const brightContext = brightCanvas.getContext('2d')
+                if (!brightContext) throw new Error('Canvas 2D is unavailable')
+                brightContext.drawImage(canvas, 0, 0)
+                const brightPixels = brightContext.getImageData(0, 0, brightCanvas.width, brightCanvas.height)
+                for (let offset = 0; offset < brightPixels.data.length; offset += 4) {
+                    const luminance = brightPixels.data[offset] * 0.2126
+                        + brightPixels.data[offset + 1] * 0.7152
+                        + brightPixels.data[offset + 2] * 0.0722
+                    if (luminance < 128) brightPixels.data[offset + 3] = 0
+                }
+                brightContext.putImageData(brightPixels, 0, 0)
+                frames.set(`${Number(isSpecial)}:${frame}:${color}`, { image: canvas, brightImage: brightCanvas })
             }
         }
     }
@@ -161,7 +176,9 @@ export const createBackground = (
             const size = Math.max(1, Math.round(focal * (special ? 0.05 : 0.03) / distance))
             const centerX = starResolution / 2 + focal * x / distance
             const centerY = starResolution / 2 - focal * y / distance
-            starContext.drawImage(variant.image, Math.round(centerX - size / 2), Math.round(centerY - size / 2), size, size)
+            // Below 6 px, outline shades overwhelm the star's light core.
+            const image = size < 6 ? variant.brightImage : variant.image
+            starContext.drawImage(image, Math.round(centerX - size / 2), Math.round(centerY - size / 2), size, size)
         }
         compose(Math.max(0, lastGradientTime))
     }

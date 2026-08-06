@@ -53,6 +53,8 @@ const disposePlanet = (planet: PlanetRuntime): void => {
 
 async function init(): Promise<void> {
     const stage = $('stage')
+    // Renderer canvases mount here, not on #stage: the aberration filter must not touch text
+    const canvasStack = $('canvas-stack')
     const starCanvas = $<HTMLCanvasElement>('star-layer')
     let seed = seedFromUrl()
     writeSeedToUrl(seed)
@@ -85,6 +87,11 @@ async function init(): Promise<void> {
         }
     }
     const initializeRenderer = async (canvas?: HTMLCanvasElement): Promise<{ renderer: WebGPURenderer, forced: boolean }> => {
+        // ?backend=webgl forces the Firefox code path anywhere, for debugging the fallback
+        if (new URLSearchParams(location.search).get('backend') === 'webgl') {
+            console.info('backend=webgl requested; forcing WebGL.')
+            return { renderer: await initializeForcedWebGL(canvas), forced: true }
+        }
         // Firefox WebGPU (2026-08) hangs on swapchain resize; WebGL2 there for now
         if (navigator.userAgent.includes('Firefox/')) {
             console.info('Firefox detected; using WebGL until its WebGPU handles resizes.')
@@ -188,8 +195,11 @@ async function init(): Promise<void> {
         resizeFrame = requestAnimationFrame(applyResize)
     }
     new ResizeObserver(resize).observe(stage)
+    // Android keyboards resize the visual viewport without always re-firing the observer;
+    // re-running layout when the viewport settles un-wedges the stage after keyboard close
+    window.visualViewport?.addEventListener('resize', resize)
 
-    stage.appendChild(renderer.domElement)
+    canvasStack.appendChild(renderer.domElement)
     applyResize()
     background.update(0, 0)
 
@@ -219,7 +229,7 @@ async function init(): Promise<void> {
         rendererWasForced = true
         configureRenderer(renderer)
         canvas = renderer.domElement
-        stage.appendChild(canvas)
+        canvasStack.appendChild(canvas)
         bufferWidth = 0
         bufferHeight = 0
         applyResize()
@@ -268,7 +278,7 @@ async function init(): Promise<void> {
 
     // Each layer scrolls the shared phase at its own Godot-derived rate, so phase is just
     // Godot's seconds and slider 0.1 means 1×: one full surface wrap every 25 seconds.
-    let speed = 0.1
+    let speed = -0.1
     let phase = 0
     let last = -1
     // Leftover phase rate from a flick, in phase units per second, decaying back to baseline
@@ -357,9 +367,9 @@ async function init(): Promise<void> {
         // surface and turn any live momentum into one enormous jump.
         const dt = last < 0 ? 0 : Math.min(t - last, 0.1)
         last = t
-        // Positive baseline like Godot's time += delta (slider 0.1 = 1×, surface drifts
-        // left); flick momentum rides on top and decays back to the baseline.
-        phase = (phase + dt * (momentum + speed / 0.1) + PHASE_WRAP) % PHASE_WRAP
+        // Slider is negated from Godot's baseline on purpose: right = surface drifts right
+        // (counterclockwise from the north pole). Flick momentum rides on top and decays.
+        phase = (phase + dt * (momentum - speed / 0.1) + PHASE_WRAP) % PHASE_WRAP
         if (momentum !== 0) {
             momentum *= Math.exp(-dt / MOMENTUM_TAU)
             if (Math.abs(momentum) < 1) momentum = 0
@@ -466,6 +476,7 @@ async function init(): Promise<void> {
     const pixelsNumber = $<HTMLInputElement>('pixels-number')
     const tiltInput = $<HTMLInputElement>('tilt')
     const ditherInput = $<HTMLInputElement>('dither')
+    const caToggle = $<HTMLInputElement>('ca-toggle')
     const layerOptions = $('layer-options')
     const paletteSwatches = $('palette-swatches')
     const palettePicker = $<HTMLInputElement>('palette-picker')
@@ -607,6 +618,11 @@ async function init(): Promise<void> {
     syncTilt()
 
     ditherInput.addEventListener('change', syncDither)
+
+    caToggle.addEventListener('change', () => {
+        // Body-level class so one toggle covers the stage and the aberrated header
+        document.body.classList.toggle('ca-off', !caToggle.checked)
+    })
 
     palettePicker.addEventListener('input', () => {
         const colors = planet.palette.colors()

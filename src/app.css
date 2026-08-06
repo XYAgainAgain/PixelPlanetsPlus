@@ -1,6 +1,15 @@
 @import "tailwindcss";
 
+/* Bundled so visitors get the UI font; theme.css only references the family by name */
+@font-face {
+  font-family: 'Departure Mono';
+  src: url('../fonts/DepartureMono-Regular.woff2') format('woff2');
+  font-display: swap;
+}
+
 @theme {
+  --font-sans: 'Departure Mono', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'Departure Mono', ui-monospace, monospace;
   --layout-stage-block: 45dvh;
   --layout-panel-block: 55dvh;
   --layout-stage-inline: 80vw;
@@ -10,6 +19,22 @@
 /* Project-wide styles beyond Tailwind utilities live here */
 body {
   accent-color: var(--color-indigo-500);
+}
+
+/* The OG GUI's full-screen RGB shift (GUI.tscn post shader, aberration 0.001 of width);
+   canvases only, so panel text, the FPS readout, and error banners stay crisp. */
+#canvas-stack {
+  filter: url('#chromatic-aberration');
+}
+
+/* Subtle fixed-px shift for the wordmark; heavier objectBoundingBox variant stays on the stage */
+h1 {
+  filter: url('#chromatic-aberration-text');
+}
+
+body.ca-off #canvas-stack,
+body.ca-off h1 {
+  filter: none;
 }
 
 #stage canvas {
@@ -84,6 +109,56 @@ body {
 
 .palette-dialog::backdrop {
   backdrop-filter: blur(0.25rem);
+}
+
+.toggle {
+  appearance: none;
+  flex-shrink: 0;
+  inline-size: 2.5rem;
+  block-size: 1.375rem;
+  border: 1px solid var(--color-zinc-700);
+  border-radius: 999px;
+  background: var(--color-zinc-800);
+  cursor: pointer;
+  position: relative;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.toggle::after {
+  content: '';
+  position: absolute;
+  inset-block-start: 0.125rem;
+  inset-inline-start: 0.125rem;
+  inline-size: 1.125rem;
+  block-size: 1.125rem;
+  border-radius: 50%;
+  background: var(--color-zinc-400);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .toggle::after {
+    transition: translate 0.15s ease, background-color 0.15s ease;
+  }
+}
+
+.toggle:checked {
+  background: var(--color-indigo-600);
+  border-color: var(--color-indigo-500);
+}
+
+.toggle:checked::after {
+  translate: 1.125rem 0;
+  background: white;
+}
+
+.toggle:focus-visible {
+  outline: 2px solid var(--color-indigo-400);
+  outline-offset: 2px;
+}
+
+.toggle:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 @property --frac {

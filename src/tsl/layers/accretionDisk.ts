@@ -44,7 +44,7 @@ export const createAccretionDiskLayer = (v: LayerValues, u: AccretionDiskUniform
         const raw = planetUv().toVar()
         const pixels = u.planetPixels.mul(pixelScale)
         const uv = pixelize(raw, pixels).toVar()
-        const dith = ditherCheck(raw, uv, pixels).toVar()
+        const dith = ditherCheck(uv, raw, pixels).toVar()
 
         uv.assign(rotateUv(uv, u.rotation.add(rotationOffset)))
         const uv2 = vec2(uv).toVar()
