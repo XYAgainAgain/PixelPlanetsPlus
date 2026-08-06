@@ -1,6 +1,6 @@
 import { Mesh, MeshBasicNodeMaterial, PlaneGeometry, Vector4 } from 'three/webgpu'
 import {
-    Fn, If, distance, float, int, pow, smoothstep, uniform, uniformArray, vec2, vec4,
+    Fn, If, distance, float, int, mix, pow, smoothstep, uniform, uniformArray, vec2, vec4,
 } from 'three/tsl'
 import {
     circleCutout, ditherCheck, makeFbm, pixelize, planetUv, posterizeClamp, rotateUv, spherify,
@@ -51,13 +51,14 @@ export const createDryTerranLayer = (v: LayerValues, u: DryTerranUniforms): Mesh
         const f = fbm(uv.mul(size).add(vec2(u.time.mul(timeSpeed), 0.0)), u.seed, size).toVar()
 
         dLight.assign(smoothstep(-0.3, 1.2, dLight))
-        // Sequential on purpose: the first darkening can drop dLight below the second threshold
-        If(dLight.lessThan(u.lightDistance1), () => {
-            dLight.mulAssign(0.9)
-        })
-        If(dLight.lessThan(u.lightDistance2), () => {
-            dLight.mulAssign(0.9)
-        })
+        // Feather the two radial darkening steps so posterization cannot expose their circular seams.
+        const lightFeather = float(0.03)
+        dLight.mulAssign(mix(0.9, 1.0, smoothstep(
+            u.lightDistance1.sub(lightFeather), u.lightDistance1.add(lightFeather), dLight,
+        )))
+        dLight.mulAssign(mix(0.9, 1.0, smoothstep(
+            u.lightDistance2.sub(lightFeather), u.lightDistance2.add(lightFeather), dLight,
+        )))
 
         const c = dLight.mul(pow(f, 0.8)).mul(3.5).toVar()
         // Godot's (dith || !should_dither): off brightens every texel, not just the checker
