@@ -1,5 +1,12 @@
 @import "tailwindcss";
 
+@theme {
+  --layout-stage-block: 45dvh;
+  --layout-panel-block: 55dvh;
+  --layout-stage-inline: 70vw;
+  --layout-panel-inline: 30vw;
+}
+
 /* Project-wide styles beyond Tailwind utilities live here */
 body {
   accent-color: var(--color-indigo-500);
@@ -9,6 +16,11 @@ body {
   inline-size: 100%;
   block-size: 100%;
   image-rendering: pixelated;
+}
+
+#planet-type,
+#background-mode {
+  color-scheme: dark;
 }
 
 .palette-swatches {

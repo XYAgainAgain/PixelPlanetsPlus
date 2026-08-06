@@ -1,4 +1,5 @@
 import { LinearSRGBColorSpace, Mesh, PerspectiveCamera, Scene, WebGPURenderer } from 'three/webgpu'
+import { BACKGROUND_MODES, createBackground, type BackgroundMode } from './background'
 import { Color } from './palette'
 import { LAND_PHASE_PER_QUAD } from './tsl/planets/islands'
 import { PLANET_FACTORIES, createPlanet, type PlanetRuntime } from './tsl/registry'
@@ -21,12 +22,23 @@ const writeSeedToUrl = (seed: number): void => {
     history.replaceState(null, '', url)
 }
 
-const framingScale = (planet: PlanetRuntime): number => {
+const backgroundFromUrl = (): BackgroundMode => {
+    const raw = new URLSearchParams(location.search).get('background')
+    return BACKGROUND_MODES.find((mode) => mode.toLowerCase() === raw?.toLowerCase()) ?? 'Stars'
+}
+
+const writeBackgroundToUrl = (mode: BackgroundMode): void => {
+    const url = new URL(location.href)
+    url.searchParams.set('background', mode.toLowerCase())
+    history.replaceState(null, '', url)
+}
+
+const framingScale = (planet: PlanetRuntime, stageAspect: number): number => {
     const displayScale = planet.metadata.guiZoom === 2.5 ? 1.5 : planet.metadata.guiZoom === 2 ? 1.25 : 1
     const requestedScale = displayScale / planet.metadata.relativeScale
     const largestLayer = Math.max(...planet.metadata.layers.map((layer) => layer.quadScale))
     const cameraHeight = 2 * Math.tan((75 * Math.PI) / 360)
-    return Math.min(requestedScale, cameraHeight / largestLayer)
+    return Math.min(requestedScale, cameraHeight / largestLayer) * Math.min(1, stageAspect)
 }
 
 const disposePlanet = (planet: PlanetRuntime): void => {
@@ -51,6 +63,7 @@ async function init(): Promise<void> {
     // Legacy r139 wrote gl_FragColor straight to canvas; linear output matches the look
     renderer.outputColorSpace = LinearSRGBColorSpace
     renderer.setPixelRatio(1)
+    renderer.setClearColor(0x000000, 1)
 
     const scene = new Scene()
     const camera = new PerspectiveCamera(75, 1, 0.1, 100000)
@@ -58,17 +71,39 @@ async function init(): Promise<void> {
 
     let planet = createPlanet('Islands', seed)
     scene.add(planet.group)
+    const safeBackground = (mode: BackgroundMode, backgroundSeed: number) => {
+        try {
+            return createBackground(mode, backgroundSeed)
+        } catch (error: unknown) {
+            console.error('Background initialization failed; continuing with black.', error)
+            return createBackground('None', backgroundSeed)
+        }
+    }
+    let background = safeBackground(backgroundFromUrl(), seed)
+    scene.add(background.group)
 
     const canvas = renderer.domElement
     const rendererLimit = (): number => {
-        const backend = renderer.backend as typeof renderer.backend & {
-            device?: { limits?: { maxTextureDimension2D?: number } }
+        // Live cap: past ~2048 the monster fragment shaders blow the 2 s GPU timeout (Sam's call).
+        // Exports/CLI render offline later at full resolution.
+        try {
+            const backend = renderer.backend as unknown as {
+                device?: { limits?: { maxTextureDimension2D?: unknown } }
+            }
+            const deviceLimit = backend?.device?.limits?.maxTextureDimension2D
+            return typeof deviceLimit === 'number' && Number.isFinite(deviceLimit)
+                ? Math.min(2048, deviceLimit)
+                : 2048
+        } catch {
+            return 2048
         }
-        // 8192 is WebGPU's guaranteed 2D limit and prevents extreme controls from exhausting memory.
-        return Math.min(8192, backend.device?.limits?.maxTextureDimension2D ?? 8192)
     }
 
-    const resize = (): void => {
+    let resizeFrame = 0
+    let bufferWidth = 0
+    let bufferHeight = 0
+    const applyResize = (): void => {
+        resizeFrame = 0
         const w = stage.clientWidth
         const h = stage.clientHeight
         // A collapsed flex stage would mean aspect NaN and a zero-size GPU texture
@@ -76,12 +111,25 @@ async function init(): Promise<void> {
         camera.aspect = w / h
         camera.updateProjectionMatrix()
         const pixels = planet.pixels.value
-        const projectionHeight = pixels * 2 * Math.tan((camera.fov * Math.PI) / 360) / framingScale(planet)
+        const scale = framingScale(planet, camera.aspect)
+        planet.group.scale.setScalar(scale)
+        const projectionHeight = pixels * 2 * Math.tan((camera.fov * Math.PI) / 360) / scale
         const largestLayer = Math.max(...planet.metadata.layers.map((layer) => layer.quadScale))
         const desiredHeight = Math.ceil(Math.max(projectionHeight, pixels * largestLayer))
         const desiredWidth = Math.ceil(desiredHeight * camera.aspect)
-        const scale = Math.min(1, rendererLimit() / Math.max(desiredWidth, desiredHeight))
-        renderer.setSize(Math.max(1, Math.floor(desiredWidth * scale)), Math.max(1, Math.floor(desiredHeight * scale)), false)
+        const bufferScale = Math.min(1, rendererLimit() / Math.max(desiredWidth, desiredHeight))
+        const nextWidth = Math.max(1, Math.floor(desiredWidth * bufferScale))
+        const nextHeight = Math.max(1, Math.floor(desiredHeight * bufferScale))
+        if (nextWidth !== bufferWidth || nextHeight !== bufferHeight) {
+            renderer.setSize(nextWidth, nextHeight, false)
+            bufferWidth = nextWidth
+            bufferHeight = nextHeight
+        }
+        background.resize(w, h, pixels)
+    }
+    const resize = (): void => {
+        if (resizeFrame !== 0) return
+        resizeFrame = requestAnimationFrame(applyResize)
     }
     new ResizeObserver(resize).observe(stage)
 
@@ -99,6 +147,7 @@ async function init(): Promise<void> {
     // advancing time slides the surface against the drag, not with it.
     const SCRUB_PER_UV = -LAND_PHASE_PER_QUAD
     const MOMENTUM_TAU = 0.5
+    const PHASE_WRAP = 1_000
     // A flick faster than 20 quad widths/second is a glitchy sample, not an intent
     const MAX_FLICK = 20 * Math.abs(SCRUB_PER_UV)
 
@@ -108,7 +157,7 @@ async function init(): Promise<void> {
         const rect = canvas.getBoundingClientRect()
         if (rect.height === 0) return null
         const quadPx = rect.height / (2 * Math.tan((camera.fov * Math.PI) / 360))
-        const scale = framingScale(planet)
+        const scale = framingScale(planet, camera.aspect)
         return {
             x: (e.clientX - (rect.left + rect.width / 2)) / (quadPx * scale) + 0.5,
             y: (e.clientY - (rect.top + rect.height / 2)) / (quadPx * scale) + 0.5,
@@ -175,7 +224,7 @@ async function init(): Promise<void> {
         const now = e.timeStamp / 1000
         const dt = now - lastDragT
         const dPhase = (uv.x - lastDragX) * SCRUB_PER_UV
-        phase += dPhase
+        phase = (phase + dPhase + PHASE_WRAP) % PHASE_WRAP
         if (dt > 0) {
             const v = Math.max(-MAX_FLICK, Math.min(MAX_FLICK, dPhase / dt))
             // Blend so one stuttering frame can't define the flick; the first sample of a
@@ -219,13 +268,24 @@ async function init(): Promise<void> {
         last = t
         // Positive baseline like Godot's time += delta (slider 0.1 = 1×, surface drifts
         // left); flick momentum rides on top and decays back to the baseline.
-        phase += dt * (momentum + speed / 0.1)
+        phase = (phase + dt * (momentum + speed / 0.1) + PHASE_WRAP) % PHASE_WRAP
         if (momentum !== 0) {
             momentum *= Math.exp(-dt / MOMENTUM_TAU)
             if (Math.abs(momentum) < 1) momentum = 0
         }
         planet.updateTime(phase)
-        renderer.render(scene, camera)
+        background.update(t, dt)
+        background.renderStars(renderer)
+        try {
+            renderer.render(scene, camera)
+        } catch (error: unknown) {
+            if (background.mode === 'None') throw error
+            console.error('Background rendering failed; continuing with black.', error)
+            background.dispose()
+            background = safeBackground('None', seed)
+            scene.add(background.group)
+            renderer.render(scene, camera)
+        }
     }
 
     const syncAnimationLoop = (): void => {
@@ -276,13 +336,18 @@ async function init(): Promise<void> {
                     await replacement.init()
                     replacement.outputColorSpace = LinearSRGBColorSpace
                     replacement.setPixelRatio(1)
+                    replacement.setClearColor(0x000000, 1)
                     renderer = replacement
                     installDeviceLossHandler()
+                    bufferWidth = 0
+                    bufferHeight = 0
                     resize()
                     document.getElementById('renderer-status')?.remove()
                     recovering = false
                     syncAnimationLoop()
                 } catch (error: unknown) {
+                    recovering = true
+                    renderer.setAnimationLoop(null)
                     showRendererMessage('Graphics recovery failed. Reload the page to retry.')
                     console.error(error)
                 }
@@ -297,6 +362,18 @@ async function init(): Promise<void> {
     const typeSelect = $<HTMLSelectElement>('planet-type')
     typeSelect.replaceChildren(...PLANET_FACTORIES.map(({ metadata }) => new Option(metadata.name, metadata.name)))
     typeSelect.value = 'Islands'
+    const backgroundSelect = $<HTMLSelectElement>('background-mode')
+    backgroundSelect.value = background.mode
+    writeBackgroundToUrl(background.mode)
+
+    backgroundSelect.addEventListener('change', () => {
+        const outgoing = background
+        background = safeBackground(backgroundSelect.value as BackgroundMode, seed)
+        scene.add(background.group)
+        outgoing.dispose()
+        background.resize(stage.clientWidth, stage.clientHeight, planet.pixels.value)
+        writeBackgroundToUrl(background.mode)
+    })
 
     const pixelsInput = $<HTMLInputElement>('pixels')
     const pixelsNumber = $<HTMLInputElement>('pixels-number')
@@ -331,7 +408,7 @@ async function init(): Promise<void> {
     }
 
     const syncFraming = (): void => {
-        planet.group.scale.setScalar(framingScale(planet))
+        planet.group.scale.setScalar(framingScale(planet, camera.aspect))
     }
 
     const syncLayers = (): void => {
@@ -378,6 +455,7 @@ async function init(): Promise<void> {
     $('seed-reroll').addEventListener('click', () => {
         seed = Math.floor(Math.random() * 1_000_000)
         planet.reseed(seed)
+        background.reseed(seed)
         writeSeedToUrl(seed)
         seedInput.value = String(seed)
         syncPalette()
@@ -392,12 +470,13 @@ async function init(): Promise<void> {
         seed = next
         seedInput.value = String(seed)
         planet.reseed(seed)
+        background.reseed(seed)
         writeSeedToUrl(seed)
         syncPalette()
     }
     seedInput.addEventListener('change', applySeedInput)
 
-    const clampPixels = (value: number): number => Math.max(12, Math.min(5000, Math.round(value)))
+    const clampPixels = (value: number): number => Math.max(12, Math.min(2048, Math.round(value)))
     const syncPixels = (source: HTMLInputElement): void => {
         const pixels = clampPixels(Number(source.value))
         pixelsInput.value = String(pixels)

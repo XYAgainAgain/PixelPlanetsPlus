@@ -10,26 +10,36 @@
     <link href="css/theme.css" rel="stylesheet" type="text/css"><link href="css/pg-tailwind.css" rel="stylesheet" data-pg-only><link rel="stylesheet" href="./src/app.css">
     <script type="module" src="./src/main.ts"></script>
 </head>
-<body class="min-h-dvh bg-zinc-950 font-sans text-zinc-100">
-    <div class="flex min-h-dvh flex-col lg:flex-row">
+<body class="h-dvh overflow-hidden bg-black font-sans text-zinc-100">
+    <div class="flex h-dvh flex-col lg:flex-row">
 
         <!-- Stage: Renderer Goes Here! -->
-        <main id="stage" class="relative grid flex-1 place-items-center overflow-hidden">
+        <main id="stage" class="sticky top-0 z-10 grid h-[var(--layout-stage-block)] w-full flex-none place-items-center overflow-hidden bg-black lg:static lg:h-dvh lg:w-[var(--layout-stage-inline)] lg:min-w-0 lg:flex-1">
             <p id="stage-placeholder" class="text-sm text-zinc-500 select-none">a tiny world will spin here soon</p>
             <p id="fps" class="pointer-events-none absolute bottom-2 left-2 font-mono text-xs text-zinc-500 select-none">FPS: 0</p>
         </main>
 
         <!-- Control Panel -->
-        <aside class="flex w-full h-100vh flex-col gap-6 overflow-y-auto border-t border-zinc-800 bg-zinc-900/60 p-6 lg:w-80 lg:border-t-0 lg:border-l">
-            <header>
-                <h1 style="text-align: left;" class="lg:text-lg lg:font-bold lg:tracking-tight">PixelPlanetsPlus</h1>
-                <p class="text-sm text-zinc-400" style="text-align: center;">procedural pixel worlds!</p>
+        <aside class="flex h-[var(--layout-panel-block)] w-full flex-none flex-col gap-6 overflow-y-auto border-t border-zinc-800 bg-zinc-900/60 p-6 lg:h-dvh lg:w-[var(--layout-panel-inline)] lg:min-w-[20rem] lg:border-t-0 lg:border-l">
+            <header class="grid place-items-center text-center">
+                <h1 class="lg:text-lg lg:font-bold lg:tracking-tight">PixelPlanetsPlus</h1>
+                <p class="text-sm text-zinc-400">procedural pixel worlds!</p>
             </header>
 
             <div class="flex flex-col gap-2">
                 <label for="planet-type" class="text-sm font-medium text-zinc-300">Celestial Body</label>
                 <select id="planet-type" class="rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm">
                     <option>Islands</option>
+                </select>
+            </div>
+
+            <div class="flex flex-col gap-2">
+                <label for="background-mode" class="text-sm font-medium text-zinc-300">Background</label>
+                <select id="background-mode" class="rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm">
+                    <option>None</option>
+                    <option>Stars</option>
+                    <option>Gradient</option>
+                    <option>Stars on Gradient</option>
                 </select>
             </div>
 
@@ -46,19 +56,19 @@
             <div class="flex flex-col gap-2">
                 <div class="flex items-center justify-between gap-3">
                     <label for="pixels" class="text-sm font-medium text-zinc-300">Pixels</label>
-                    <input type="number" id="pixels-number" min="12" max="5000" step="1" value="100" class="w-24 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-right font-mono text-sm">
+                    <input type="number" id="pixels-number" min="12" max="2048" step="1" value="100" class="w-24 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-right font-mono text-sm">
                 </div>
-                <div id="pixel-presets" class="grid grid-cols-4 gap-1">
-                    <button type="button" data-px="16" class="rounded border border-zinc-700 bg-zinc-800 px-1 py-1 text-xs hover:bg-zinc-700" data-pgc-define="button" data-pgc-define-name="Button" name="Button" data-pgc-edit="Inner text" data-pgc-edit-classes="text-xs,border,bg-zinc-800,border-zinc-700,hover:bg-zinc-700">16</button>
-                    <button type="button" data-px="32" class="rounded border border-zinc-700 bg-zinc-800 px-1 py-1 text-xs hover:bg-zinc-700">32</button>
-                    <button type="button" data-px="64" class="rounded border border-zinc-700 bg-zinc-800 px-1 py-1 text-xs hover:bg-zinc-700">64</button>
-                    <button type="button" data-px="128" class="rounded border border-zinc-700 bg-zinc-800 px-1 py-1 text-xs hover:bg-zinc-700">128</button>
-                    <button type="button" data-px="256" class="rounded border border-zinc-700 bg-zinc-800 px-1 py-1 text-xs hover:bg-zinc-700">256</button>
-                    <button type="button" data-px="512" class="rounded border border-zinc-700 bg-zinc-800 px-1 py-1 text-xs hover:bg-zinc-700">512</button>
-                    <button type="button" data-px="1024" class="rounded border border-zinc-700 bg-zinc-800 px-1 py-1 text-xs hover:bg-zinc-700">1024</button>
-                    <button type="button" data-px="2048" class="rounded border border-zinc-700 bg-zinc-800 px-1 py-1 text-xs hover:bg-zinc-700">2048</button>
+                <div id="pixel-presets" class="grid grid-cols-4 gap-2">
+                    <button type="button" class="rounded border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs whitespace-nowrap hover:bg-zinc-700" data-pgc-define="button" data-pgc-define-name="Button" name="Button" data-pgc-edit="Inner text" data-pgc-edit-classes="text-xs,border,bg-zinc-800,border-zinc-700,hover:bg-zinc-700" data-px="100">OG 100</button>
+                    <button type="button" data-px="32" class="rounded border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs hover:bg-zinc-700">32</button>
+                    <button type="button" data-px="64" class="rounded border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs hover:bg-zinc-700">64</button>
+                    <button type="button" data-px="128" class="rounded border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs hover:bg-zinc-700">128</button>
+                    <button type="button" data-px="256" class="rounded border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs hover:bg-zinc-700">256</button>
+                    <button type="button" data-px="512" class="rounded border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs hover:bg-zinc-700">512</button>
+                    <button type="button" data-px="1024" class="rounded border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs hover:bg-zinc-700">1024</button>
+                    <button type="button" data-px="2048" class="rounded border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs hover:bg-zinc-700">2048</button>
                 </div>
-                <input type="range" id="pixels" min="12" max="5000" step="1" value="100">
+                <input type="range" id="pixels" min="12" max="2048" step="1" value="100">
             </div>
 
             <div class="flex flex-col gap-2">
