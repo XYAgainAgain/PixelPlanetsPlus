@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" shape-rendering="crispEdges" role="img" aria-labelledby="title desc">
+  <title id="title">Pixel Planets Plus favicon</title>
+  <desc id="desc">A round blue and green pixel planet with a tiny golden moon and scattered stars!</desc>
+
+  <defs>
+    <clipPath id="planet-clip">
+      <path d="M192 80h128v16h48v16h32v16h16v16h16v32h16v48h16v96h-16v48h-16v32h-16v16h-16v16h-32v16h-48v16H192v-16h-48v-16h-32v-16H96v-16H80v-32H64v-48H48v-96h16v-48h16v-32h16v-16h16v-16h32V96h48z"/>
+    </clipPath>
+  </defs>
+
+  <rect width="512" height="512" rx="112" fill="#0b071f"/>
+
+  <g aria-label="stars">
+    <g fill="#fff3c4">
+      <rect x="64" y="80" width="16" height="16"/>
+      <rect x="448" y="176" width="16" height="16"/>
+      <rect x="48" y="400" width="16" height="16"/>
+      <rect x="432" y="416" width="16" height="16"/>
+      <rect x="96" y="48" width="8" height="8"/>
+      <rect x="32" y="208" width="8" height="8"/>
+      <rect x="464" y="320" width="8" height="8"/>
+    </g>
+    <g fill="#8f75d6">
+      <rect x="48" y="144" width="16" height="16"/>
+      <rect x="448" y="240" width="16" height="16"/>
+      <rect x="80" y="448" width="8" height="8"/>
+    </g>
+  </g>
+
+  <g aria-label="planet">
+    <path d="M192 80h128v16h48v16h32v16h16v16h16v32h16v48h16v96h-16v48h-16v32h-16v16h-16v16h-32v16h-48v16H192v-16h-48v-16h-32v-16H96v-16H80v-32H64v-48H48v-96h16v-48h16v-32h16v-16h16v-16h32V96h48z" fill="#30216b"/>
+    <g clip-path="url(#planet-clip)">
+      <rect x="64" y="96" width="384" height="352" fill="#4d59b8"/>
+      <path d="M96 128h48v-16h176v16h64v16h32v32h16v64h-16v32h-32v-16h-32v-48h-32v-16h-64v-16h-80v16h-48v32H96z" fill="#61bfd0"/>
+      <path d="M80 224h48v-32h64v16h64v32h32v64h-16v32h-48v16h-80v-16H96v-48H80z" fill="#64d3ad"/>
+      <path d="M288 304h64v16h48v32h32v64h-48v16h-48v16h-112v-32h16v-48h16v-32h32z" fill="#64d3ad"/>
+      <path d="M64 352h32v32h32v16h48v32h64v32H64z" fill="#373286"/>
+      <path d="M352 96h64v32h32v48h16v176h-16v64h-32v32h-64v-32h16v-48h16v-80h-16v-80h-16V96z" fill="#373286" opacity=".82"/>
+      <path d="M112 112h64V96h128v16h48v16h32v16h16v16h-48v-16h-64v-16h-96v16h-48v16H96v-16h16z" fill="#9ae9e8"/>
+      <g fill="#fff3c4">
+        <rect x="128" y="176" width="96" height="16"/>
+        <rect x="112" y="192" width="144" height="16"/>
+        <rect x="272" y="240" width="96" height="16"/>
+        <rect x="304" y="256" width="112" height="16"/>
+        <rect x="128" y="336" width="64" height="16"/>
+        <rect x="144" y="352" width="96" height="16"/>
+      </g>
+      <g fill="#8bf0cf">
+        <rect x="144" y="240" width="48" height="16"/>
+        <rect x="176" y="256" width="64" height="16"/>
+        <rect x="304" y="352" width="48" height="16"/>
+      </g>
+      <g fill="#2f2a86">
+        <rect x="80" y="256" width="16" height="64"/>
+        <rect x="96" y="320" width="16" height="32"/>
+        <rect x="176" y="416" width="48" height="16"/>
+        <rect x="352" y="176" width="16" height="48"/>
+        <rect x="400" y="304" width="16" height="48"/>
+      </g>
+      <path d="M96 144h16v-16h32v-16h48V96h128v16h48v16h32v16h16v32h16v48h16v80h-16v-64h-16v-48h-16v-16h-32v-16h-48v-16H192v16h-48v16H96z" fill="#ffffff" opacity=".14"/>
+    </g>
+  </g>
+
+  <g aria-label="moon">
+    <rect x="400" y="48" width="48" height="16" fill="#fff3c4"/>
+    <rect x="384" y="64" width="80" height="48" fill="#fff3c4"/>
+    <rect x="400" y="112" width="48" height="16" fill="#fff3c4"/>
+    <rect x="400" y="64" width="16" height="16" fill="#f5b94c"/>
+    <rect x="432" y="96" width="16" height="16" fill="#d7794a"/>
+  </g>
+</svg>
