@@ -7,7 +7,7 @@ import type { LayerValues } from '../values'
 /* BlackHole/BlackHoleRing.gdshader: the oversized, extremely edge-on accretion disk. */
 
 export interface AccretionDiskSharedUniforms {
-    pixels: UF
+    planetPixels: UF
     rotation: UF
     seed: UF
 }
@@ -38,11 +38,13 @@ export const createAccretionDiskLayer = (v: LayerValues, u: AccretionDiskUniform
     const fbm = makeFbm(v.octaves ?? 3, v.noise ?? { hash: 15.5453, tiling: 'planet' })
     const size = float(v.size ?? 50.0)
     const rotationOffset = v.rotationOffset ?? 0.0
+    const pixelScale = v.quadScale
 
     const fragment = Fn(() => {
         const raw = planetUv().toVar()
-        const uv = pixelize(raw, u.pixels).toVar()
-        const dith = ditherCheck(raw, uv, u.pixels).toVar()
+        const pixels = u.planetPixels.mul(pixelScale)
+        const uv = pixelize(raw, pixels).toVar()
+        const dith = ditherCheck(raw, uv, pixels).toVar()
 
         uv.assign(rotateUv(uv, u.rotation.add(rotationOffset)))
         const uv2 = vec2(uv).toVar()

@@ -20,7 +20,7 @@
         </main>
 
         <!-- Control Panel -->
-        <aside class="flex w-full h-100vh flex-col gap-6 border-t border-zinc-800 bg-zinc-900/60 p-6 lg:w-80 lg:border-t-0 lg:border-l">
+        <aside class="flex w-full h-100vh flex-col gap-6 overflow-y-auto border-t border-zinc-800 bg-zinc-900/60 p-6 lg:w-80 lg:border-t-0 lg:border-l">
             <header>
                 <h1 style="text-align: left;" class="lg:text-lg lg:font-bold lg:tracking-tight">PixelPlanetsPlus</h1>
                 <p class="text-sm text-zinc-400" style="text-align: center;">procedural pixel worlds!</p>
@@ -29,33 +29,24 @@
             <div class="flex flex-col gap-2">
                 <label for="planet-type" class="text-sm font-medium text-zinc-300">Celestial Body</label>
                 <select id="planet-type" class="rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm">
-                    <option>No Atmosphere</option>
-                    <option>Terran Dry</option>
-                    <option>Terran Wet</option>
                     <option>Islands</option>
-                    <option>Ice World</option>
-                    <option>Lava World</option>
-                    <option>Gas Giant</option>
-                    <option>Ringed Giant</option>
-                    <option>Asteroid</option>
-                    <option>Star</option>
                 </select>
             </div>
 
             <div class="flex flex-col gap-2">
-                <div class="flex items-baseline justify-between">
-                    <span class="text-sm font-medium text-zinc-300">Seed</span>
-                    <output id="seed-value" class="font-mono text-sm text-zinc-400">1</output>
+                <label for="seed-value" class="text-sm font-medium text-zinc-300">Seed</label>
+                <div class="grid grid-cols-[1fr_auto] gap-2">
+                    <input type="text" inputmode="numeric" id="seed-value" value="1" class="min-w-0 rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 font-mono text-sm">
+                    <button id="seed-reroll" type="button" class="rounded-lg bg-indigo-600 px-3 py-2 text-sm font-semibold transition hover:bg-indigo-500 active:scale-95">
+                        Reroll
+                    </button>
                 </div>
-                <button id="seed-reroll" type="button" class="rounded-lg bg-indigo-600 px-3 py-2 text-sm font-semibold transition hover:bg-indigo-500 active:scale-95">
-                    Reroll Planet
-                </button>
             </div>
 
             <div class="flex flex-col gap-2">
-                <div class="flex items-baseline justify-between">
+                <div class="flex items-center justify-between gap-3">
                     <label for="pixels" class="text-sm font-medium text-zinc-300">Pixels</label>
-                    <output id="pixels-value" class="font-mono text-sm text-zinc-400">100</output>
+                    <input type="number" id="pixels-number" min="12" max="5000" step="1" value="100" class="w-24 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-right font-mono text-sm">
                 </div>
                 <div id="pixel-presets" class="grid grid-cols-4 gap-1">
                     <button type="button" data-px="16" class="rounded border border-zinc-700 bg-zinc-800 px-1 py-1 text-xs hover:bg-zinc-700" data-pgc-define="button" data-pgc-define-name="Button" name="Button" data-pgc-edit="Inner text" data-pgc-edit-classes="text-xs,border,bg-zinc-800,border-zinc-700,hover:bg-zinc-700">16</button>
@@ -67,7 +58,7 @@
                     <button type="button" data-px="1024" class="rounded border border-zinc-700 bg-zinc-800 px-1 py-1 text-xs hover:bg-zinc-700">1024</button>
                     <button type="button" data-px="2048" class="rounded border border-zinc-700 bg-zinc-800 px-1 py-1 text-xs hover:bg-zinc-700">2048</button>
                 </div>
-                <input type="range" id="pixels" min="16" max="4096" step="2" value="100">
+                <input type="range" id="pixels" min="12" max="5000" step="1" value="100">
             </div>
 
             <div class="flex flex-col gap-2">
@@ -83,8 +74,32 @@
                     <label for="tilt" class="text-sm font-medium text-zinc-300">Tilt</label>
                     <output id="tilt-value" class="font-mono text-sm text-zinc-400">0</output>
                 </div>
-                <input type="range" id="tilt" min="-3.14" max="3.14" step="0.01" value="0">
+                <input type="range" id="tilt" min="0" max="6.28" step="0.01" value="0">
             </div>
+
+            <label class="flex items-center justify-between gap-3 text-sm font-medium text-zinc-300">
+                Dither
+                <input type="checkbox" id="dither" checked>
+            </label>
+
+            <fieldset class="flex flex-col gap-2">
+                <legend class="mb-2 text-sm font-medium text-zinc-300">Layers</legend>
+                <div id="layer-options" class="flex flex-col gap-2"></div>
+            </fieldset>
+
+            <fieldset class="flex flex-col gap-3">
+                <legend class="mb-2 text-sm font-medium text-zinc-300">Colors</legend>
+                <div id="palette-swatches" class="palette-swatches" aria-label="Palette colors"></div>
+                <div class="grid grid-cols-[auto_1fr_1fr] gap-2">
+                    <label class="palette-picker-label" title="Edit selected color">
+                        <span class="sr-only">Edit selected color</span>
+                        <input type="color" id="palette-picker" value="#ffffff">
+                    </label>
+                    <button id="palette-random" type="button" class="rounded border border-zinc-700 bg-zinc-800 px-2 py-2 text-xs hover:bg-zinc-700">Random</button>
+                    <button id="palette-reset" type="button" class="rounded border border-zinc-700 bg-zinc-800 px-2 py-2 text-xs hover:bg-zinc-700">Reset</button>
+                </div>
+                <button id="palette-transfer" type="button" class="rounded border border-zinc-700 bg-zinc-800 px-2 py-2 text-xs hover:bg-zinc-700">Import/Export</button>
+            </fieldset>
 
             <fieldset class="flex flex-col gap-2" disabled="">
                 <legend class="text-sm font-medium text-zinc-300">Export <span class="text-zinc-500">(coming soon)</span></legend>
@@ -100,5 +115,22 @@
                 <p><a href="https://github.com/XYAgainAgain/PixelPlanetsPlus" class="gap-1 hover:text-zinc-300 inline-flex items-center underline" target="_blank"><svg class="btn__mark gap-1 inline-flex items-center" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"/></svg>PixelPlanetsPlus GitHub</a></p></footer>
         </aside>
     </div>
+
+    <dialog id="palette-dialog" class="palette-dialog rounded-xl border border-zinc-700 bg-zinc-900 p-5 text-zinc-100 backdrop:bg-black/70">
+        <form method="dialog" class="flex min-w-72 flex-col gap-3 sm:min-w-96">
+            <div class="flex items-center justify-between gap-4">
+                <h2 class="font-semibold">Palette Import/Export</h2>
+                <button type="submit" class="rounded px-2 py-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100" aria-label="Close palette dialog">×</button>
+            </div>
+            <label for="palette-text" class="text-xs text-zinc-400">One #RRGGBB color per line</label>
+            <textarea id="palette-text" rows="12" spellcheck="false" class="rounded border border-zinc-700 bg-zinc-950 p-3 font-mono text-sm"></textarea>
+            <div class="grid grid-cols-3 gap-2">
+                <button id="palette-copy" type="button" class="rounded border border-zinc-700 bg-zinc-800 px-2 py-2 text-xs hover:bg-zinc-700">Copy To</button>
+                <button id="palette-paste" type="button" class="rounded border border-zinc-700 bg-zinc-800 px-2 py-2 text-xs hover:bg-zinc-700">Paste From</button>
+                <button id="palette-apply" type="button" class="rounded bg-indigo-600 px-2 py-2 text-xs font-semibold hover:bg-indigo-500">Apply</button>
+            </div>
+            <output id="palette-message" class="min-h-4 text-xs text-zinc-400" aria-live="polite"></output>
+        </form>
+    </dialog>
 </body>
 </html>

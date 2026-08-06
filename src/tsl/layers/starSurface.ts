@@ -30,7 +30,7 @@ const makeCells = (tiles: number) => Fn(([pIn, numCells]: [NV2, NF]) => {
         Loop(3, ({ i: yo }) => {
             const offset = vec2(float(xo).sub(1.0), float(yo).sub(1.0))
             const tp = floor(p).add(offset).toVar()
-            const wrapped = mod(tp, numCells.div(tiles))
+            const wrapped = mod(tp, numCells.div(tiles)).toVar()
             const r = float(523.0).mul(sin(dot(wrapped, vec2(53.3158, 43.6143))))
             const hash = vec2(fract(r.mul(15.32354)), fract(r.mul(17.25865)))
             tp.assign(p.sub(tp).sub(hash))

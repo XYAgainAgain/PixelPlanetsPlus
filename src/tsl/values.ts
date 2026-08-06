@@ -9,7 +9,7 @@ export type Vec4Tuple = readonly [number, number, number, number]
 export interface LayerValues {
     node: string
     shader: string
-    // Quad and pixels multiplier vs the planet (rings and disk 3, star blobs/flares 2)
+    // Oversized-layer factories own this mesh scale and multiply shared planet pixels by it in-shader.
     quadScale: number
     pixels: number
     colors: readonly Vec4Tuple[]
@@ -73,6 +73,8 @@ export interface PlanetValues {
     lightDrag: boolean
     // Layer node names whose should_dither the dither toggle writes (empty on Gas giant 1)
     ditherLayers: readonly string[]
+    // Empty when a one-layer body has no useful visibility toggle.
+    layerMenu?: readonly number[]
     layers: readonly LayerValues[]
 }
 
@@ -436,6 +438,7 @@ export const PLANETS = {
         guiZoom: 2.5,
         lightDrag: false,
         ditherLayers: ['Galaxy'],
+        layerMenu: [],
         layers: [
             {
                 // colors[6] is a deliberate headroom slot beyond n_colors, reachable via the clamp

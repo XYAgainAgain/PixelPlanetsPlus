@@ -1,5 +1,7 @@
-import { LinearSRGBColorSpace, PerspectiveCamera, Scene, WebGPURenderer } from 'three/webgpu'
-import { LAND_PHASE_PER_QUAD, createIslands, reseedIslands, updateIslandsTime } from './tsl/planets/islands'
+import { LinearSRGBColorSpace, Mesh, PerspectiveCamera, Scene, WebGPURenderer } from 'three/webgpu'
+import { Color } from './palette'
+import { LAND_PHASE_PER_QUAD } from './tsl/planets/islands'
+import { PLANET_FACTORIES, createPlanet, type PlanetRuntime } from './tsl/registry'
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
     const el = document.getElementById(id)
@@ -19,33 +21,67 @@ const writeSeedToUrl = (seed: number): void => {
     history.replaceState(null, '', url)
 }
 
+const framingScale = (planet: PlanetRuntime): number => {
+    const displayScale = planet.metadata.guiZoom === 2.5 ? 1.5 : planet.metadata.guiZoom === 2 ? 1.25 : 1
+    const requestedScale = displayScale / planet.metadata.relativeScale
+    const largestLayer = Math.max(...planet.metadata.layers.map((layer) => layer.quadScale))
+    const cameraHeight = 2 * Math.tan((75 * Math.PI) / 360)
+    return Math.min(requestedScale, cameraHeight / largestLayer)
+}
+
+const disposePlanet = (planet: PlanetRuntime): void => {
+    planet.group.traverse((object) => {
+        if (!(object instanceof Mesh)) return
+        object.geometry.dispose()
+        const materials = Array.isArray(object.material) ? object.material : [object.material]
+        for (const material of materials) material.dispose()
+    })
+    planet.group.removeFromParent()
+}
+
 async function init(): Promise<void> {
     const stage = $('stage')
     let seed = seedFromUrl()
     writeSeedToUrl(seed)
-    $('seed-value').textContent = String(seed)
+    const seedInput = $<HTMLInputElement>('seed-value')
+    seedInput.value = String(seed)
 
-    const renderer = new WebGPURenderer({ antialias: false })
+    let renderer = new WebGPURenderer({ antialias: false })
     await renderer.init()
     // Legacy r139 wrote gl_FragColor straight to canvas; linear output matches the look
     renderer.outputColorSpace = LinearSRGBColorSpace
-    renderer.setPixelRatio(window.devicePixelRatio)
+    renderer.setPixelRatio(1)
 
     const scene = new Scene()
     const camera = new PerspectiveCamera(75, 1, 0.1, 100000)
     camera.position.z = 1
 
-    const { group, uniforms } = createIslands(seed)
-    scene.add(group)
+    let planet = createPlanet('Islands', seed)
+    scene.add(planet.group)
+
+    const canvas = renderer.domElement
+    const rendererLimit = (): number => {
+        const backend = renderer.backend as typeof renderer.backend & {
+            device?: { limits?: { maxTextureDimension2D?: number } }
+        }
+        // 8192 is WebGPU's guaranteed 2D limit and prevents extreme controls from exhausting memory.
+        return Math.min(8192, backend.device?.limits?.maxTextureDimension2D ?? 8192)
+    }
 
     const resize = (): void => {
         const w = stage.clientWidth
         const h = stage.clientHeight
         // A collapsed flex stage would mean aspect NaN and a zero-size GPU texture
         if (w === 0 || h === 0) return
-        renderer.setSize(w, h)
         camera.aspect = w / h
         camera.updateProjectionMatrix()
+        const pixels = planet.pixels.value
+        const projectionHeight = pixels * 2 * Math.tan((camera.fov * Math.PI) / 360) / framingScale(planet)
+        const largestLayer = Math.max(...planet.metadata.layers.map((layer) => layer.quadScale))
+        const desiredHeight = Math.ceil(Math.max(projectionHeight, pixels * largestLayer))
+        const desiredWidth = Math.ceil(desiredHeight * camera.aspect)
+        const scale = Math.min(1, rendererLimit() / Math.max(desiredWidth, desiredHeight))
+        renderer.setSize(Math.max(1, Math.floor(desiredWidth * scale)), Math.max(1, Math.floor(desiredHeight * scale)), false)
     }
     new ResizeObserver(resize).observe(stage)
 
@@ -55,7 +91,6 @@ async function init(): Promise<void> {
 
     // Drag does two things depending on where it starts: off the disc it moves the light like
     // the Godot original, on the disc it spins the planet. Mode locks at pointerdown.
-    const canvas = renderer.domElement
     canvas.style.touchAction = 'none'
     // Past 1.1 from disc center every pixel clears light_border_2 and the planet goes flat
     // black; 0.85 keeps a lit crescent no matter how far the drag wanders.
@@ -73,9 +108,10 @@ async function init(): Promise<void> {
         const rect = canvas.getBoundingClientRect()
         if (rect.height === 0) return null
         const quadPx = rect.height / (2 * Math.tan((camera.fov * Math.PI) / 360))
+        const scale = framingScale(planet)
         return {
-            x: (e.clientX - (rect.left + rect.width / 2)) / quadPx + 0.5,
-            y: (e.clientY - (rect.top + rect.height / 2)) / quadPx + 0.5,
+            x: (e.clientX - (rect.left + rect.width / 2)) / (quadPx * scale) + 0.5,
+            y: (e.clientY - (rect.top + rect.height / 2)) / (quadPx * scale) + 0.5,
         }
     }
 
@@ -84,9 +120,9 @@ async function init(): Promise<void> {
         const dy = uv.y - 0.5
         const d = Math.hypot(dx, dy)
         if (d > LIGHT_REACH) {
-            uniforms.lightOrigin.value.set(0.5 + (dx / d) * LIGHT_REACH, 0.5 + (dy / d) * LIGHT_REACH)
+            planet.lightOrigin?.value.set(0.5 + (dx / d) * LIGHT_REACH, 0.5 + (dy / d) * LIGHT_REACH)
         } else {
-            uniforms.lightOrigin.value.set(uv.x, uv.y)
+            planet.lightOrigin?.value.set(uv.x, uv.y)
         }
     }
 
@@ -118,8 +154,13 @@ async function init(): Promise<void> {
             dragVelocity = 0
             momentum = 0
         } else {
-            dragMode = 'light'
-            setLight(uv)
+            if (planet.metadata.lightDrag && planet.lightOrigin) {
+                dragMode = 'light'
+                setLight(uv)
+            } else {
+                canvas.releasePointerCapture(e.pointerId)
+                dragPointerId = -1
+            }
         }
     })
 
@@ -183,11 +224,15 @@ async function init(): Promise<void> {
             momentum *= Math.exp(-dt / MOMENTUM_TAU)
             if (Math.abs(momentum) < 1) momentum = 0
         }
-        updateIslandsTime(uniforms, phase)
+        planet.updateTime(phase)
         renderer.render(scene, camera)
     }
 
     const syncAnimationLoop = (): void => {
+        if (recovering) {
+            renderer.setAnimationLoop(null)
+            return
+        }
         renderer.setAnimationLoop(document.hidden ? null : animate)
         if (!document.hidden) {
             last = -1
@@ -195,39 +240,183 @@ async function init(): Promise<void> {
             fpsSince = -1
         }
     }
+
+    let recoveryAttempted = false
+    let recovering = false
+    const showRendererMessage = (message: string): void => {
+        let output = document.getElementById('renderer-status')
+        if (!output) {
+            output = document.createElement('p')
+            output.id = 'renderer-status'
+            output.className = 'pointer-events-none absolute inset-x-6 top-6 z-10 rounded-lg border border-red-800 bg-red-950/90 p-3 text-center text-sm text-red-100'
+            output.setAttribute('role', 'alert')
+            stage.appendChild(output)
+        }
+        output.textContent = message
+    }
+
+    const installDeviceLossHandler = (): void => {
+        renderer.onDeviceLost = (info): void => {
+            if (recovering) return
+            renderer.setAnimationLoop(null)
+            console.error(`WebGPU device lost: ${info.message}`, info.originalEvent)
+            if (recoveryAttempted) {
+                recovering = true
+                showRendererMessage('The graphics device was lost again. Reload the page to retry.')
+                return
+            }
+            recoveryAttempted = true
+            recovering = true
+            showRendererMessage('The graphics device was lost. Attempting to recover…')
+            const lostRenderer = renderer
+            void (async () => {
+                try {
+                    lostRenderer.dispose()
+                    const replacement = new WebGPURenderer({ antialias: false, canvas })
+                    await replacement.init()
+                    replacement.outputColorSpace = LinearSRGBColorSpace
+                    replacement.setPixelRatio(1)
+                    renderer = replacement
+                    installDeviceLossHandler()
+                    resize()
+                    document.getElementById('renderer-status')?.remove()
+                    recovering = false
+                    syncAnimationLoop()
+                } catch (error: unknown) {
+                    showRendererMessage('Graphics recovery failed. Reload the page to retry.')
+                    console.error(error)
+                }
+            })()
+        }
+    }
+    installDeviceLossHandler()
     document.addEventListener('visibilitychange', syncAnimationLoop)
     syncAnimationLoop()
 
     // Controls
     const typeSelect = $<HTMLSelectElement>('planet-type')
-    for (const option of typeSelect.options) {
-        option.disabled = option.value !== 'Islands'
-    }
+    typeSelect.replaceChildren(...PLANET_FACTORIES.map(({ metadata }) => new Option(metadata.name, metadata.name)))
     typeSelect.value = 'Islands'
+
+    const pixelsInput = $<HTMLInputElement>('pixels')
+    const pixelsNumber = $<HTMLInputElement>('pixels-number')
+    const tiltInput = $<HTMLInputElement>('tilt')
+    const ditherInput = $<HTMLInputElement>('dither')
+    const layerOptions = $('layer-options')
+    const paletteSwatches = $('palette-swatches')
+    const palettePicker = $<HTMLInputElement>('palette-picker')
+    const paletteDialog = $<HTMLDialogElement>('palette-dialog')
+    const paletteText = $<HTMLTextAreaElement>('palette-text')
+    const paletteMessage = $<HTMLOutputElement>('palette-message')
+    let activeSwatch = 0
+
+    const syncPalette = (): void => {
+        const colors = planet.palette.colors()
+        activeSwatch = Math.min(activeSwatch, colors.length - 1)
+        paletteSwatches.replaceChildren(...colors.map((color, index) => {
+            const swatch = document.createElement('button')
+            swatch.type = 'button'
+            swatch.className = 'palette-swatch'
+            swatch.style.setProperty('--swatch', color.toHex())
+            swatch.setAttribute('aria-label', `Color ${index + 1}: ${color.toHex()}`)
+            swatch.setAttribute('aria-pressed', String(index === activeSwatch))
+            swatch.addEventListener('click', () => {
+                activeSwatch = index
+                syncPalette()
+                palettePicker.click()
+            })
+            return swatch
+        }))
+        palettePicker.value = colors[activeSwatch]?.toHex() ?? '#000000'
+    }
+
+    const syncFraming = (): void => {
+        planet.group.scale.setScalar(framingScale(planet))
+    }
+
+    const syncLayers = (): void => {
+        const layerIndices = planet.metadata.layerMenu ?? planet.metadata.layers.map((_, index) => index)
+        layerOptions.replaceChildren(...layerIndices.map((index) => {
+            const layer = planet.metadata.layers[index]!
+            const label = document.createElement('label')
+            label.className = 'flex items-center gap-2 text-sm text-zinc-300'
+            const checkbox = document.createElement('input')
+            checkbox.type = 'checkbox'
+            checkbox.checked = planet.group.children[index]?.visible ?? true
+            checkbox.addEventListener('change', () => {
+                planet.setLayerVisible(index, checkbox.checked)
+            })
+            label.append(checkbox, document.createTextNode(layer.node))
+            return label
+        }))
+    }
+
+    const syncDither = (): void => {
+        planet.setDither(ditherInput.checked)
+        ditherInput.disabled = planet.metadata.ditherLayers.length === 0
+    }
+
+    const syncPlanetControls = (): void => {
+        planet.pixels.value = Number(pixelsNumber.value)
+        planet.rotation.value = Number(tiltInput.value)
+        syncFraming()
+        syncDither()
+        syncLayers()
+        activeSwatch = 0
+        syncPalette()
+        resize()
+    }
+
+    typeSelect.addEventListener('change', () => {
+        const outgoing = planet
+        planet = createPlanet(typeSelect.value, seed)
+        scene.add(planet.group)
+        disposePlanet(outgoing)
+        syncPlanetControls()
+    })
 
     $('seed-reroll').addEventListener('click', () => {
         seed = Math.floor(Math.random() * 1_000_000)
-        reseedIslands(uniforms, seed)
+        planet.reseed(seed)
         writeSeedToUrl(seed)
-        $('seed-value').textContent = String(seed)
+        seedInput.value = String(seed)
+        syncPalette()
     })
 
-    const pixelsInput = $<HTMLInputElement>('pixels')
-    const syncPixels = (): void => {
-        uniforms.pixels.value = Number(pixelsInput.value)
-        $('pixels-value').textContent = pixelsInput.value
+    const applySeedInput = (): void => {
+        const next = Number.parseInt(seedInput.value, 10)
+        if (!Number.isFinite(next)) {
+            seedInput.value = String(seed)
+            return
+        }
+        seed = next
+        seedInput.value = String(seed)
+        planet.reseed(seed)
+        writeSeedToUrl(seed)
+        syncPalette()
     }
-    pixelsInput.addEventListener('input', syncPixels)
-    syncPixels()
+    seedInput.addEventListener('change', applySeedInput)
+
+    const clampPixels = (value: number): number => Math.max(12, Math.min(5000, Math.round(value)))
+    const syncPixels = (source: HTMLInputElement): void => {
+        const pixels = clampPixels(Number(source.value))
+        pixelsInput.value = String(pixels)
+        pixelsNumber.value = String(pixels)
+        planet.pixels.value = pixels
+        resize()
+    }
+    pixelsInput.addEventListener('input', () => { syncPixels(pixelsInput) })
+    pixelsNumber.addEventListener('change', () => { syncPixels(pixelsNumber) })
+    syncPixels(pixelsNumber)
 
     $('pixel-presets').addEventListener('click', (e) => {
         const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-px]')
         if (!btn?.dataset['px']) return
-        pixelsInput.value = btn.dataset['px']
-        syncPixels()
+        pixelsNumber.value = btn.dataset['px']
+        syncPixels(pixelsNumber)
     })
 
-    // Both signed sliders fill from the center out; --frac drives that gradient
+    // The signed speed slider fills from the center out; --frac drives that gradient
     const setCenterFill = (input: HTMLInputElement): void => {
         const lo = Number(input.min)
         const hi = Number(input.max)
@@ -244,14 +433,72 @@ async function init(): Promise<void> {
     syncSpeed()
 
     // Godot's "Rotation" slider is axial tilt, a static roll of the sampled UV, not a rate
-    const tiltInput = $<HTMLInputElement>('tilt')
     const syncTilt = (): void => {
-        uniforms.rotation.value = Number(tiltInput.value)
+        planet.rotation.value = Number(tiltInput.value)
         $('tilt-value').textContent = tiltInput.value
-        setCenterFill(tiltInput)
     }
     tiltInput.addEventListener('input', syncTilt)
     syncTilt()
+
+    ditherInput.addEventListener('change', syncDither)
+
+    palettePicker.addEventListener('input', () => {
+        const colors = planet.palette.colors()
+        colors[activeSwatch] = Color.fromHex(palettePicker.value)
+        planet.palette.setColors(colors)
+        syncPalette()
+    })
+
+    $('palette-random').addEventListener('click', () => {
+        planet.palette.randomize()
+        syncPalette()
+    })
+
+    $('palette-reset').addEventListener('click', () => {
+        planet.palette.reset()
+        syncPalette()
+    })
+
+    $('palette-transfer').addEventListener('click', () => {
+        paletteText.value = planet.palette.colors().map((color) => color.toHex()).join('\n')
+        paletteMessage.value = ''
+        paletteDialog.showModal()
+    })
+
+    $('palette-copy').addEventListener('click', async () => {
+        try {
+            await navigator.clipboard.writeText(paletteText.value)
+            paletteMessage.value = 'Copied palette.'
+        } catch (error: unknown) {
+            paletteMessage.value = 'Clipboard copy failed.'
+            console.error(error)
+        }
+    })
+
+    $('palette-paste').addEventListener('click', async () => {
+        try {
+            paletteText.value = await navigator.clipboard.readText()
+            paletteMessage.value = 'Pasted palette.'
+        } catch (error: unknown) {
+            paletteMessage.value = 'Clipboard paste failed.'
+            console.error(error)
+        }
+    })
+
+    $('palette-apply').addEventListener('click', () => {
+        const colors = paletteText.value.replaceAll(',', '').split(/\r?\n/).map((line) => {
+            try {
+                return Color.fromHex(line.trim())
+            } catch {
+                return Color.fromHex('#000000')
+            }
+        })
+        planet.palette.setColors(colors)
+        paletteMessage.value = 'Applied palette.'
+        syncPalette()
+    })
+
+    syncPlanetControls()
 }
 
 init().catch((err: unknown) => {

@@ -7,7 +7,7 @@ import type { LayerValues } from '../values'
 /* Star/StarBlobs.gdshader: the oversized radial blob layer around the stellar disc. */
 
 export interface StarBlobsSharedUniforms {
-    pixels: UF
+    planetPixels: UF
     rotation: UF
     seed: UF
 }
@@ -44,10 +44,11 @@ export const createStarBlobsLayer = (v: LayerValues, u: StarBlobsUniforms): Mesh
     const size = float(v.size ?? 4.93)
     const timeSpeed = float(v.timeSpeed ?? 0.05)
     const rotationOffset = v.rotationOffset ?? 0.0
+    const pixelScale = v.quadScale
 
     const fragment = Fn(() => {
         const raw = planetUv().toVar()
-        const pixelized = pixelize(raw, u.pixels).toVar()
+        const pixelized = pixelize(raw, u.planetPixels.mul(pixelScale)).toVar()
         const uv = rotateUv(pixelized, u.rotation.add(rotationOffset)).toVar()
         const angle = atan(uv.x.sub(0.5), uv.y.sub(0.5)).toVar()
         const d = distance(pixelized, vec2(0.5)).toVar()
@@ -66,5 +67,7 @@ export const createStarBlobsLayer = (v: LayerValues, u: StarBlobsUniforms): Mesh
 
     const material = new MeshBasicNodeMaterial({ transparent: true })
     material.fragmentNode = fragment()
-    return new Mesh(new PlaneGeometry(1, 1), material)
+    const mesh = new Mesh(new PlaneGeometry(1, 1), material)
+    mesh.scale.setScalar(v.quadScale)
+    return mesh
 }

@@ -17,6 +17,7 @@ export const createRingUniforms = (v: LayerValues, shared: RingSharedUniforms) =
     ringWidth: uniform(v.ringWidth ?? 0.127),
     ringPerspective: uniform(v.ringPerspective ?? 6.0),
     scaleRelToPlanet: uniform(v.scaleRelToPlanet ?? 6.0),
+    occludesPlanet: uniform(1.0),
     colors: v.colors.map((c) => uniform(new Vector4(...c))),
     darkColors: (v.darkColors ?? v.colors).map((c) => uniform(new Vector4(...c))),
 })
@@ -40,7 +41,8 @@ export const createRingLayer = (v: LayerValues, u: RingUniforms): Mesh => {
         const ring = smoothstep(float(0.5).sub(u.ringWidth.mul(2.0)), float(0.5).sub(u.ringWidth), centerD)
             .mul(smoothstep(centerD.sub(u.ringWidth), centerD, 0.4)).toVar()
 
-        If(uv.y.lessThan(0.5), () => {
+        // Deliberate upgrade: a hidden gas layer no longer erases the ring's front-facing center.
+        If(uv.y.lessThan(0.5).and(u.occludesPlanet.greaterThan(0.5)), () => {
             ring.mulAssign(step(float(1.0).div(u.scaleRelToPlanet), distance(uv, vec2(0.5))))
         })
 
@@ -64,5 +66,7 @@ export const createRingLayer = (v: LayerValues, u: RingUniforms): Mesh => {
 
     const material = new MeshBasicNodeMaterial({ transparent: true })
     material.fragmentNode = fragment()
-    return new Mesh(new PlaneGeometry(1, 1), material)
+    const mesh = new Mesh(new PlaneGeometry(1, 1), material)
+    mesh.scale.setScalar(v.quadScale)
+    return mesh
 }
