@@ -1,61 +1,50 @@
 import { Mesh, MeshBasicNodeMaterial, PlaneGeometry, Vector4 } from 'three/webgpu'
-import {
-    Fn, If, Loop, distance, float, smoothstep, step, uniform, vec2, vec4,
-} from 'three/tsl'
-import {
-    circleCutout, makeCircleNoise, makeFbm, pixelize, planetUv, rotateUv, spherify,
-} from '../common'
+import { Fn, If, Loop, distance, float, smoothstep, step, uniform, vec2, vec4 } from 'three/tsl'
+import { circleCutout, makeCircleNoise, makeFbm, pixelize, planetUv, rotateUv, spherify } from '../common'
 import type { UF, UV2 } from '../common'
 import type { LayerValues } from '../values'
 
-/* LandMasses/Clouds.gdshader: the shared cloud shader (Terran Wet, Islands, Ice World).
-   Statement order follows the Godot fragment. */
-
-export interface CloudSharedUniforms {
+export interface GasPlanetSharedUniforms {
     pixels: UF
     rotation: UF
     lightOrigin: UV2
     seed: UF
 }
 
-export const createCloudUniforms = (v: LayerValues, shared: CloudSharedUniforms) => ({
+export const createGasPlanetUniforms = (v: LayerValues, shared: GasPlanetSharedUniforms) => ({
     ...shared,
     time: uniform(0.0),
-    cloudCover: uniform(v.cloudCover ?? 0.415),
-    stretch: uniform(v.stretch ?? 2.0),
+    cloudCover: uniform(v.cloudCover ?? 0.0),
+    stretch: uniform(v.stretch ?? 1.0),
     cloudCurve: uniform(v.cloudCurve ?? 1.3),
     lightBorder1: uniform(v.lightBorder1 ?? 0.52),
     lightBorder2: uniform(v.lightBorder2 ?? 0.62),
     colors: v.colors.map((c) => uniform(new Vector4(...c))),
 })
-export type CloudUniforms = ReturnType<typeof createCloudUniforms>
+export type GasPlanetUniforms = ReturnType<typeof createGasPlanetUniforms>
 
-export const createCloudLayer = (v: LayerValues, u: CloudUniforms): Mesh => {
+export const createGasPlanetLayer = (v: LayerValues, u: GasPlanetUniforms): Mesh => {
     const spec = v.noise ?? { hash: 15.5453, tiling: 'simple' as const }
-    const fbm = makeFbm(v.octaves ?? 2, spec)
+    const fbm = makeFbm(v.octaves ?? 5, spec)
     const circleNoise = makeCircleNoise(spec)
-    const size = float(v.size ?? 7.745)
-    const timeSpeed = float(v.timeSpeed ?? 0.47)
+    const size = float(v.size ?? 9.0)
+    const timeSpeed = float(v.timeSpeed ?? 0.2)
+    const rotationOffset = v.rotationOffset ?? 0.0
 
     const fragment = Fn(() => {
-        // Pre-mutation reads frozen with .toVar(); see planetUnder.ts for the TSL gotcha
         const raw = planetUv().toVar()
         const uv = pixelize(raw, u.pixels).toVar()
         const dLight = distance(uv, u.lightOrigin).toVar()
         const alpha = circleCutout(uv).toVar()
-        const dToCenter = distance(uv, vec2(0.5)).toVar()
 
-        uv.assign(rotateUv(uv, u.rotation))
+        uv.assign(rotateUv(uv, u.rotation.add(rotationOffset)))
         uv.assign(spherify(uv))
-        // "slightly make uv go down on the right, and up in the left" — the cloud band curve
         uv.assign(vec2(uv.x, uv.y.add(smoothstep(0.0, u.cloudCurve, uv.x.sub(0.4).abs()))))
 
-        // cloud_alpha(uv * vec2(1.0, stretch)), inlined
         const cuv = uv.mul(vec2(1.0, u.stretch))
         const scroll = vec2(u.time.mul(timeSpeed), 0.0)
         const cNoise = float(0.0).toVar()
         Loop(9, ({ i }) => {
-            // float(i+1) + 10.0 in Godot; i counts from 0 here, so i + 11
             cNoise.addAssign(circleNoise(cuv.mul(size).mul(0.3).add(float(i).add(11.0)).add(scroll), u.seed, size))
         })
         const c = fbm(cuv.mul(size).add(cNoise).add(scroll), u.seed, size).toVar()
@@ -65,8 +54,6 @@ export const createCloudLayer = (v: LayerValues, u: CloudUniforms): Mesh => {
         If(dLight.add(c.mul(0.2)).greaterThan(u.lightBorder1), () => { col.assign(u.colors[2]) })
         If(dLight.add(c.mul(0.2)).greaterThan(u.lightBorder2), () => { col.assign(u.colors[3]) })
 
-        // Godot cuts the cloud field at a flat 0.5 here, unlike the 0.49999 disc alpha above
-        c.mulAssign(step(dToCenter, 0.5))
         return vec4(col.xyz, step(u.cloudCover, c).mul(alpha).mul(col.w))
     })
 

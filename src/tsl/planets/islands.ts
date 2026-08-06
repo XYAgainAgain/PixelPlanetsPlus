@@ -1,65 +1,74 @@
-import { Group, Vector2, Vector4 } from 'three/webgpu'
+import { Group, Vector2 } from 'three/webgpu'
 import { uniform } from 'three/tsl'
-import { createRng, deriveSeed, layerSeed } from '../../rng'
-import { createIslandsBaseLayer } from '../layers/basePlanet'
-import { createIslandsLandLayer } from '../layers/landMass'
-import { createIslandsCloudLayer } from '../layers/cloudLayer'
-import { createIslandsAtmosphereLayer } from '../layers/atmosphereLayer'
+import { convertSeed, createRng, deriveSeed } from '../../rng'
+import { getMultiplier } from '../common'
+import { PLANETS } from '../values'
+import { createPlanetUnderLayer, createPlanetUnderUniforms } from '../layers/planetUnder'
+import { createLandmassLayer, createLandmassUniforms } from '../layers/landMass'
+import { createCloudLayer, createCloudUniforms } from '../layers/cloudLayer'
+import { createAtmosphereLayer, createAtmosphereUniforms } from '../layers/atmosphereLayer'
+
+const [WATER, LAND, CLOUD] = PLANETS.islands.layers
+
+/* Godot's update_time scalar per layer (LandMasses.gd:29–32); time_speed cancels in the
+   shader's time·time_speed, so each layer scrolls at round(size)·2·k per phase second. */
+const WATER_TIME = getMultiplier(WATER.size, WATER.timeSpeed) * WATER.timeK
+const LAND_TIME = getMultiplier(LAND.size, LAND.timeSpeed) * LAND.timeK
+const CLOUD_TIME = getMultiplier(CLOUD.size, CLOUD.timeSpeed) * CLOUD.timeK
+
+/* Phase units that scroll the land one quad width. Drag-to-spin scrubs against this
+   so the continents, which is what the eye tracks, follow the pointer exactly. */
+export const LAND_PHASE_PER_QUAD = LAND.size / (LAND_TIME * LAND.timeSpeed)
 
 /* Godot rerolls cloud_cover per seed (LandMasses.gd:22), so the tscn's 0.415 never
    survives to the screen; derive it here or the same seed URL wouldn't replay. */
-const cloudCoverForSeed = (rootSeed: number): number =>
-    0.35 + createRng(deriveSeed(rootSeed, 3)).next() * 0.25
+const cloudCoverForSeed = (rootSeed: number): number => {
+    const [lo, hi] = CLOUD.cloudCoverRange
+    return lo + createRng(deriveSeed(rootSeed, 3)).next() * (hi - lo)
+}
 
-/* One uniform bundle drives all four layers so panel controls hit everything at once */
-export const createIslandsUniforms = (rootSeed: number) => ({
-    pixels: uniform(100.0),
-    // Axial tilt, Godot's "Rotation" slider; the land layer adds its own +0.2 offset
-    rotation: uniform(0.0),
-    time: uniform(0.0),
-    // Godot's (0.39, 0.39) through our y-up flip; the disc is lit from the upper left
-    lightOrigin: uniform(new Vector2(0.39, 0.61)),
-    lightIntensity: uniform(0.1),
-    landCutoff: uniform(0.633),
-    cloudCover: uniform(cloudCoverForSeed(rootSeed)),
-    stretch: uniform(2.0),
-    // Deep-Fold tuned these per layer in LandMasses.tscn:15–16, 31–32, 49–50
-    lightBordersBase: uniform(new Vector2(0.4, 0.6)),
-    lightBordersLand: uniform(new Vector2(0.32, 0.534)),
-    lightBordersClouds: uniform(new Vector2(0.52, 0.62)),
-    // The atmosphere is the JS port's invention with no Godot ancestor, so these borders are
-    // mine: 0.4/0.6 matches the water beneath it so the rim's terminator lines up with the disc.
-    lightBordersAtmo: uniform(new Vector2(0.4, 0.6)),
-    seedBase: uniform(layerSeed(rootSeed, 0)),
-    seedLand: uniform(layerSeed(rootSeed, 1)),
-    seedClouds: uniform(layerSeed(rootSeed, 2)),
-})
+/* One shared bundle fans seed, light, tilt, and pixels to every layer, Godot's set_* pattern */
+export const createIslandsUniforms = (rootSeed: number) => {
+    const shared = {
+        pixels: uniform(100.0),
+        // Axial tilt, Godot's "Rotation" slider; the land layer adds its scene +0.2 offset
+        rotation: uniform(0.0),
+        lightOrigin: uniform(new Vector2(...WATER.lightOrigin)),
+        // Godot's converted-seed domain, one value fanned to all layers (S7)
+        seed: uniform(convertSeed(rootSeed)),
+    }
+    const water = createPlanetUnderUniforms(WATER, shared)
+    const land = createLandmassUniforms(LAND, shared)
+    const clouds = createCloudUniforms(CLOUD, shared)
+    clouds.cloudCover.value = cloudCoverForSeed(rootSeed)
+    const atmosphere = createAtmosphereUniforms(shared)
+    return { ...shared, water, land, clouds, atmosphere }
+}
 export type IslandsUniforms = ReturnType<typeof createIslandsUniforms>
 
 export const reseedIslands = (u: IslandsUniforms, rootSeed: number): void => {
-    u.seedBase.value = layerSeed(rootSeed, 0)
-    u.seedLand.value = layerSeed(rootSeed, 1)
-    u.seedClouds.value = layerSeed(rootSeed, 2)
-    u.cloudCover.value = cloudCoverForSeed(rootSeed)
+    u.seed.value = convertSeed(rootSeed)
+    u.clouds.cloudCover.value = cloudCoverForSeed(rootSeed)
+}
+
+/* Godot feeds each layer t·get_multiplier·k every frame (Planet.gd:_process); t is our phase */
+export const updateIslandsTime = (u: IslandsUniforms, t: number): void => {
+    u.water.time.value = t * WATER_TIME
+    u.land.time.value = t * LAND_TIME
+    u.clouds.time.value = t * CLOUD_TIME
 }
 
 export const createIslands = (rootSeed: number) => {
     const uniforms = createIslandsUniforms(rootSeed)
     const islands = new Group()
 
-    // Fresh Vector4s per call (uniform() stores by reference); water palette from LandMasses.tscn:17
-    const baseColors = [
-        new Vector4(0.572549, 0.909804, 0.752941, 1),
-        new Vector4(0.309804, 0.643137, 0.721569, 1),
-        new Vector4(0.172549, 0.207843, 0.301961, 1),
-    ]
     const layers = [
-        createIslandsBaseLayer(uniforms, baseColors),
-        createIslandsLandLayer(uniforms),
-        createIslandsCloudLayer(uniforms),
-        createIslandsAtmosphereLayer(uniforms),
+        createPlanetUnderLayer(WATER, uniforms.water),
+        createLandmassLayer(LAND, uniforms.land),
+        createCloudLayer(CLOUD, uniforms.clouds),
+        createAtmosphereLayer(uniforms.atmosphere),
     ]
-    // Transparent quads share z=0; explicit renderOrder pins the legacy stacking
+    // Transparent quads share z=0; explicit renderOrder pins the Godot stacking
     layers.forEach((mesh, i) => { mesh.renderOrder = i })
     islands.add(...layers)
 

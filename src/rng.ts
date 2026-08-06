@@ -27,9 +27,8 @@ export function deriveSeed(rootSeed: number, salt: number): number {
     return Math.floor(rng.next() * 0x7FFFFFFF)
 }
 
-/* Upstream's per-layer pattern (flip() ? rand*10 : rand*100), seeded and floored at 1:
-   seeds below ~0.064 degenerate the sin-hash into smooth bands instead of continents */
-export function layerSeed(rootSeed: number, salt: number): number {
-    const rng = createRng(deriveSeed(rootSeed, salt))
-    return rng.next() > 0.5 ? 1 + rng.next() * 9 : 1 + rng.next() * 99
+/* Godot's seed conversion, verbatim from every planet's set_seed: one converted seed in
+   [0, 10) fanned to all layers. sd % 1000 < ~7 degenerates the sin-hash (Godot ships that). */
+export function convertSeed(sd: number): number {
+    return (sd % 1000) / 100
 }

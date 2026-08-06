@@ -1,6 +1,5 @@
 import { LinearSRGBColorSpace, PerspectiveCamera, Scene, WebGPURenderer } from 'three/webgpu'
-import { createIslands, reseedIslands } from './tsl/planets/islands'
-import { LAND_PHASE_PER_QUAD } from './tsl/layers/landMass'
+import { LAND_PHASE_PER_QUAD, createIslands, reseedIslands, updateIslandsTime } from './tsl/planets/islands'
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
     const el = document.getElementById(id)
@@ -69,14 +68,14 @@ async function init(): Promise<void> {
     const MAX_FLICK = 20 * Math.abs(SCRUB_PER_UV)
 
     // The quad is 1 unit tall at the camera's unit distance, so its on-screen side is the view
-    // height there; positionGeometry.xy is y-up, hence the flipped y term.
+    // height there. Screen y-down matches the shaders' Godot UV space, so no flip anywhere.
     const quadUvFromPointer = (e: PointerEvent): { x: number, y: number } | null => {
         const rect = canvas.getBoundingClientRect()
         if (rect.height === 0) return null
         const quadPx = rect.height / (2 * Math.tan((camera.fov * Math.PI) / 360))
         return {
             x: (e.clientX - (rect.left + rect.width / 2)) / quadPx + 0.5,
-            y: 0.5 - (e.clientY - (rect.top + rect.height / 2)) / quadPx,
+            y: (e.clientY - (rect.top + rect.height / 2)) / quadPx + 0.5,
         }
     }
 
@@ -164,7 +163,7 @@ async function init(): Promise<void> {
     let fpsFrames = 0
     let fpsSince = -1
 
-    renderer.setAnimationLoop((timeMs) => {
+    const animate = (timeMs: number): void => {
         const t = timeMs / 1000
         if (fpsSince < 0) fpsSince = t
         else if (t - fpsSince >= 0.25) {
@@ -177,16 +176,27 @@ async function init(): Promise<void> {
         // surface and turn any live momentum into one enormous jump.
         const dt = last < 0 ? 0 : Math.min(t - last, 0.1)
         last = t
-        // Slider right drifts the surface right, agreeing with a rightward drag; advancing
-        // time slides it left, so the baseline sign is inverted here and nowhere else.
-        phase += dt * (momentum - speed / 0.1)
+        // Positive baseline like Godot's time += delta (slider 0.1 = 1×, surface drifts
+        // left); flick momentum rides on top and decays back to the baseline.
+        phase += dt * (momentum + speed / 0.1)
         if (momentum !== 0) {
             momentum *= Math.exp(-dt / MOMENTUM_TAU)
             if (Math.abs(momentum) < 1) momentum = 0
         }
-        uniforms.time.value = phase
+        updateIslandsTime(uniforms, phase)
         renderer.render(scene, camera)
-    })
+    }
+
+    const syncAnimationLoop = (): void => {
+        renderer.setAnimationLoop(document.hidden ? null : animate)
+        if (!document.hidden) {
+            last = -1
+            fpsFrames = 0
+            fpsSince = -1
+        }
+    }
+    document.addEventListener('visibilitychange', syncAnimationLoop)
+    syncAnimationLoop()
 
     // Controls
     const typeSelect = $<HTMLSelectElement>('planet-type')
