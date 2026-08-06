@@ -53,17 +53,74 @@ const disposePlanet = (planet: PlanetRuntime): void => {
 
 async function init(): Promise<void> {
     const stage = $('stage')
+    const starCanvas = $<HTMLCanvasElement>('star-layer')
     let seed = seedFromUrl()
     writeSeedToUrl(seed)
     const seedInput = $<HTMLInputElement>('seed-value')
     seedInput.value = String(seed)
 
-    let renderer = new WebGPURenderer({ antialias: false })
-    await renderer.init()
-    // Legacy r139 wrote gl_FragColor straight to canvas; linear output matches the look
-    renderer.outputColorSpace = LinearSRGBColorSpace
-    renderer.setPixelRatio(1)
-    renderer.setClearColor(0x000000, 1)
+    const backendName = (candidate: WebGPURenderer): string => {
+        const backend = candidate.backend as unknown as { isWebGPUBackend?: boolean, isWebGLBackend?: boolean }
+        if (backend.isWebGPUBackend) return 'WebGPU'
+        if (backend.isWebGLBackend) return 'WebGL'
+        return 'unknown'
+    }
+    const initializeForcedWebGL = async (canvas?: HTMLCanvasElement): Promise<WebGPURenderer> => {
+        const fallback = new WebGPURenderer({ antialias: false, alpha: true, forceWebGL: true, canvas })
+        let watchdog = 0
+        try {
+            await Promise.race([
+                fallback.init(),
+                new Promise<never>((_, reject) => {
+                    watchdog = window.setTimeout(() => { reject(new Error('Forced WebGL initialization timed out after 4 seconds')) }, 4000)
+                }),
+            ])
+            console.info(`Renderer backend: ${backendName(fallback)} (forced fallback)`)
+            return fallback
+        } catch (error: unknown) {
+            fallback.dispose()
+            throw error
+        } finally {
+            window.clearTimeout(watchdog)
+        }
+    }
+    const initializeRenderer = async (canvas?: HTMLCanvasElement): Promise<{ renderer: WebGPURenderer, forced: boolean }> => {
+        // Firefox WebGPU (2026-08) hangs on swapchain resize; WebGL2 there for now
+        if (navigator.userAgent.includes('Firefox/')) {
+            console.info('Firefox detected; using WebGL until its WebGPU handles resizes.')
+            return { renderer: await initializeForcedWebGL(canvas), forced: true }
+        }
+        const primary = new WebGPURenderer({ antialias: false, alpha: true, canvas })
+        let watchdog = 0
+        try {
+            await Promise.race([
+                primary.init(),
+                new Promise<never>((_, reject) => {
+                    watchdog = window.setTimeout(() => { reject(new Error('WebGPU initialization timed out after 4 seconds')) }, 4000)
+                }),
+            ])
+            console.info(`Renderer backend: ${backendName(primary)}`)
+            return { renderer: primary, forced: false }
+        } catch (error: unknown) {
+            console.info('WebGPU initialization failed or stalled; trying forced WebGL.', error)
+            primary.dispose()
+        } finally {
+            window.clearTimeout(watchdog)
+        }
+
+        return { renderer: await initializeForcedWebGL(canvas), forced: true }
+    }
+
+    let initialized = await initializeRenderer()
+    let renderer = initialized.renderer
+    let rendererWasForced = initialized.forced
+    const configureRenderer = (candidate: WebGPURenderer): void => {
+        // Legacy r139 wrote gl_FragColor straight to canvas; linear output matches the look
+        candidate.outputColorSpace = LinearSRGBColorSpace
+        candidate.setPixelRatio(1)
+        candidate.setClearColor(0x000000, 0)
+    }
+    configureRenderer(renderer)
 
     const scene = new Scene()
     const camera = new PerspectiveCamera(75, 1, 0.1, 100000)
@@ -73,16 +130,15 @@ async function init(): Promise<void> {
     scene.add(planet.group)
     const safeBackground = (mode: BackgroundMode, backgroundSeed: number) => {
         try {
-            return createBackground(mode, backgroundSeed)
+            return createBackground(mode, backgroundSeed, starCanvas)
         } catch (error: unknown) {
             console.error('Background initialization failed; continuing with black.', error)
-            return createBackground('None', backgroundSeed)
+            return createBackground('None', backgroundSeed, starCanvas)
         }
     }
     let background = safeBackground(backgroundFromUrl(), seed)
-    scene.add(background.group)
 
-    const canvas = renderer.domElement
+    let canvas = renderer.domElement
     const rendererLimit = (): number => {
         // Live cap: past ~2048 the monster fragment shaders blow the 2 s GPU timeout (Sam's call).
         // Exports/CLI render offline later at full resolution.
@@ -133,9 +189,44 @@ async function init(): Promise<void> {
     }
     new ResizeObserver(resize).observe(stage)
 
-    $('stage-placeholder').remove()
     stage.appendChild(renderer.domElement)
-    resize()
+    applyResize()
+    background.update(0, 0)
+
+    const presentFirstFrame = async (candidate: WebGPURenderer): Promise<void> => {
+        // compileAsync never settles on Firefox (both backends); treat it as a best-effort
+        // warmup with a 3 s budget and rely on render()'s synchronous compile path instead.
+        await Promise.race([
+            candidate.compileAsync(scene, camera).catch(() => {}),
+            new Promise<void>((resolve) => { window.setTimeout(resolve, 3000) }),
+        ])
+        candidate.render(scene, camera)
+        await new Promise<void>((resolve) => { requestAnimationFrame(() => { resolve() }) })
+    }
+
+    try {
+        await presentFirstFrame(renderer)
+        console.info(`First frame presented with ${backendName(renderer)}.`)
+    } catch (error: unknown) {
+        if (rendererWasForced) throw error
+        console.info('First WebGPU frame failed or stalled; rebuilding with forced WebGL.', error)
+        renderer.dispose()
+        canvas.remove()
+        disposePlanet(planet)
+        planet = createPlanet('Islands', seed)
+        scene.add(planet.group)
+        renderer = await initializeForcedWebGL()
+        rendererWasForced = true
+        configureRenderer(renderer)
+        canvas = renderer.domElement
+        stage.appendChild(canvas)
+        bufferWidth = 0
+        bufferHeight = 0
+        applyResize()
+        await presentFirstFrame(renderer)
+        console.info('First frame presented with forced WebGL after WebGPU first-frame failure.')
+    }
+    $('stage-placeholder').remove()
 
     // Drag does two things depending on where it starts: off the disc it moves the light like
     // the Godot original, on the disc it spins the planet. Mode locks at pointerdown.
@@ -275,7 +366,7 @@ async function init(): Promise<void> {
         }
         planet.updateTime(phase)
         background.update(t, dt)
-        background.renderStars(renderer)
+        renderer.setClearColor(0x000000, 0)
         try {
             renderer.render(scene, camera)
         } catch (error: unknown) {
@@ -283,7 +374,6 @@ async function init(): Promise<void> {
             console.error('Background rendering failed; continuing with black.', error)
             background.dispose()
             background = safeBackground('None', seed)
-            scene.add(background.group)
             renderer.render(scene, camera)
         }
     }
@@ -332,12 +422,10 @@ async function init(): Promise<void> {
             void (async () => {
                 try {
                     lostRenderer.dispose()
-                    const replacement = new WebGPURenderer({ antialias: false, canvas })
-                    await replacement.init()
-                    replacement.outputColorSpace = LinearSRGBColorSpace
-                    replacement.setPixelRatio(1)
-                    replacement.setClearColor(0x000000, 1)
-                    renderer = replacement
+                    initialized = await initializeRenderer(canvas)
+                    renderer = initialized.renderer
+                    rendererWasForced = initialized.forced
+                    configureRenderer(renderer)
                     installDeviceLossHandler()
                     bufferWidth = 0
                     bufferHeight = 0
@@ -369,7 +457,6 @@ async function init(): Promise<void> {
     backgroundSelect.addEventListener('change', () => {
         const outgoing = background
         background = safeBackground(backgroundSelect.value as BackgroundMode, seed)
-        scene.add(background.group)
         outgoing.dispose()
         background.resize(stage.clientWidth, stage.clientHeight, planet.pixels.value)
         writeBackgroundToUrl(background.mode)

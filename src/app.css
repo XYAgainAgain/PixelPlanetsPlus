@@ -3,8 +3,8 @@
 @theme {
   --layout-stage-block: 45dvh;
   --layout-panel-block: 55dvh;
-  --layout-stage-inline: 70vw;
-  --layout-panel-inline: 30vw;
+  --layout-stage-inline: 80vw;
+  --layout-panel-inline: 20vw;
 }
 
 /* Project-wide styles beyond Tailwind utilities live here */
@@ -13,9 +13,26 @@ body {
 }
 
 #stage canvas {
+  position: absolute;
+  image-rendering: pixelated;
+}
+
+#stage canvas:not(#star-layer) {
+  inset: 0;
   inline-size: 100%;
   block-size: 100%;
-  image-rendering: pixelated;
+}
+
+/* Square canvas sized by JS; centered so its max-dimension side covers the stage both ways */
+#star-layer {
+  inset: 50% auto auto 50%;
+  z-index: 0;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+#stage canvas:not(#star-layer) {
+  z-index: 1;
 }
 
 #planet-type,

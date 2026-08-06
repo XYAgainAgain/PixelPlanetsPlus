@@ -14,13 +14,14 @@
     <div class="flex h-dvh flex-col lg:flex-row">
 
         <!-- Stage: Renderer Goes Here! -->
-        <main id="stage" class="sticky top-0 z-10 grid h-[var(--layout-stage-block)] w-full flex-none place-items-center overflow-hidden bg-black lg:static lg:h-dvh lg:w-[var(--layout-stage-inline)] lg:min-w-0 lg:flex-1">
+        <main id="stage" class="sticky top-0 z-10 grid h-[var(--layout-stage-block)] w-full flex-none place-items-center overflow-hidden bg-black lg:relative lg:h-dvh lg:w-[var(--layout-stage-inline)] lg:min-w-0 lg:flex-1">
+            <canvas id="star-layer" hidden aria-hidden="true"></canvas>
             <p id="stage-placeholder" class="text-sm text-zinc-500 select-none">a tiny world will spin here soon</p>
             <p id="fps" class="pointer-events-none absolute bottom-2 left-2 font-mono text-xs text-zinc-500 select-none">FPS: 0</p>
         </main>
 
         <!-- Control Panel -->
-        <aside class="flex h-[var(--layout-panel-block)] w-full flex-none flex-col gap-6 overflow-y-auto border-t border-zinc-800 bg-zinc-900/60 p-6 lg:h-dvh lg:w-[var(--layout-panel-inline)] lg:min-w-[20rem] lg:border-t-0 lg:border-l">
+        <aside class="flex h-[var(--layout-panel-block)] w-full flex-none flex-col gap-6 overflow-y-auto border-t border-zinc-800 bg-zinc-900/60 p-6 lg:h-dvh lg:w-[var(--layout-panel-inline)] lg:min-w-[20rem] lg:gap-3 lg:border-t-0 lg:border-l lg:p-4">
             <header class="grid place-items-center text-center">
                 <h1 class="lg:text-lg lg:font-bold lg:tracking-tight">PixelPlanetsPlus</h1>
                 <p class="text-sm text-zinc-400">procedural pixel worlds!</p>
