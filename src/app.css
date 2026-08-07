@@ -111,6 +111,218 @@ body.ca-off h1 {
   backdrop-filter: blur(0.25rem);
 }
 
+.export-workspace {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  overflow: hidden;
+  background: var(--color-black);
+}
+
+.export-workspace[hidden] {
+  display: none;
+}
+
+.export-workspace [hidden] {
+  display: none;
+}
+
+.export-preview-stage {
+  position: relative;
+  display: grid;
+  place-items: center;
+  inline-size: 100%;
+  block-size: 100%;
+  min-block-size: 0;
+  overflow: hidden;
+  background:
+    linear-gradient(45deg, var(--color-zinc-900) 25%, transparent 25% 75%, var(--color-zinc-900) 75%),
+    linear-gradient(45deg, var(--color-zinc-900) 25%, var(--color-zinc-950) 25% 75%, var(--color-zinc-900) 75%);
+  background-position: 0 0, 0.5rem 0.5rem;
+  background-size: 1rem 1rem;
+}
+
+.export-preview {
+  max-inline-size: 100%;
+  max-block-size: 100%;
+  display: block;
+  image-rendering: pixelated;
+  touch-action: none;
+}
+
+.export-preview:focus-visible {
+  outline: 2px solid var(--color-indigo-400);
+  outline-offset: -2px;
+}
+
+.export-drag-handle {
+  --export-drag-x: 0px;
+  --export-drag-y: 0px;
+  position: absolute;
+  z-index: 2;
+  border: 1px solid color-mix(in srgb, var(--color-indigo-300) 75%, transparent);
+  border-radius: 9999px;
+  background: color-mix(in srgb, var(--color-indigo-500) 16%, transparent);
+  cursor: grab;
+  touch-action: none;
+  transform: translate(-50%, -50%) translate3d(var(--export-drag-x), var(--export-drag-y), 0);
+  will-change: transform;
+}
+
+.export-drag-handle:active {
+  cursor: grabbing;
+}
+
+.export-body-handle {
+  inline-size: var(--export-body-handle-size, 3rem);
+  block-size: var(--export-body-handle-size, 3rem);
+}
+
+.export-light-handle {
+  z-index: 3;
+  inline-size: 1.25rem;
+  block-size: 1.25rem;
+  border-color: var(--color-yellow-300);
+  background: color-mix(in srgb, var(--color-yellow-400) 35%, transparent);
+}
+
+.export-light-handle[hidden] {
+  display: none;
+}
+
+.export-preview-help {
+  position: absolute;
+  inset-block-end: 0.75rem;
+  inset-inline-start: 50%;
+  translate: -50% 0;
+  max-inline-size: calc(100% - 1.5rem);
+  padding: 0.375rem 0.625rem;
+  border: 1px solid color-mix(in srgb, var(--color-zinc-600) 70%, transparent);
+  border-radius: 0.375rem;
+  background: color-mix(in srgb, var(--color-zinc-950) 85%, transparent);
+  color: var(--color-zinc-300);
+  font-size: 0.6875rem;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.export-controls {
+  display: flex;
+  min-block-size: 100%;
+  flex-direction: column;
+  gap: 1rem;
+  overflow-y: auto;
+  color-scheme: dark;
+}
+
+.export-controls[hidden] {
+  display: none;
+}
+
+#control-panel.export-active {
+  overflow: hidden;
+}
+
+#control-panel.export-active > :not(#export-form) {
+  display: none;
+}
+
+.export-field {
+  display: flex;
+  min-inline-size: 0;
+  flex-direction: column;
+  gap: 0.25rem;
+  color: var(--color-zinc-400);
+  font-size: 0.6875rem;
+}
+
+.export-field > input:not([type='range'], [type='color']),
+.export-field > select {
+  min-inline-size: 0;
+  border: 1px solid var(--color-zinc-700);
+  border-radius: 0.375rem;
+  background: var(--color-zinc-800);
+  padding: 0.5rem;
+  color: var(--color-zinc-100);
+  font-size: 0.75rem;
+}
+
+.export-field > input[type='color'] {
+  inline-size: 100%;
+  min-block-size: 2rem;
+  border: 1px solid var(--color-zinc-700);
+  border-radius: 0.375rem;
+  background: var(--color-zinc-800);
+}
+
+.export-format-button,
+.export-secondary-button,
+.export-icon-button {
+  border: 1px solid var(--color-zinc-700);
+  background: var(--color-zinc-800);
+  color: var(--color-zinc-100);
+}
+
+.export-format-button {
+  border-radius: 0.5rem;
+  padding: 0.5rem;
+  font-size: 0.75rem;
+}
+
+.export-secondary-button {
+  border-radius: 0.375rem;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.75rem;
+}
+
+.export-icon-button {
+  inline-size: 2rem;
+  block-size: 2rem;
+  border-radius: 0.375rem;
+  font-size: 1rem;
+}
+
+.export-format-button:hover,
+.export-secondary-button:hover,
+.export-icon-button:hover {
+  background: var(--color-zinc-700);
+}
+
+.export-format-button[aria-pressed='true'] {
+  border-color: var(--color-indigo-400);
+  background: var(--color-indigo-600);
+}
+
+.export-format-button:focus-visible,
+.export-secondary-button:focus-visible,
+.export-icon-button:focus-visible {
+  outline: 2px solid var(--color-indigo-400);
+  outline-offset: 2px;
+}
+
+.export-warning {
+  border-inline-start: 2px solid var(--color-amber-400);
+  padding-inline-start: 0.5rem;
+  color: var(--color-amber-200);
+  font-size: 0.6875rem;
+}
+
+.export-footer {
+  position: sticky;
+  inset-block-end: -1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.625rem;
+  border-block-start: 1px solid var(--color-zinc-700);
+  background: var(--color-zinc-900);
+  padding-block: 0.75rem 1rem;
+}
+
+#export-progress {
+  block-size: 0.5rem;
+  accent-color: var(--color-indigo-500);
+}
+
 .toggle {
   appearance: none;
   flex-shrink: 0;

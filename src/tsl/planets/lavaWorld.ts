@@ -37,6 +37,12 @@ export const updateLavaWorldTime = (u: LavaWorldUniforms, t: number): void => {
     u.lavaRivers.time.value = t * LAVA_RIVERS_TIME
 }
 
+export const setLavaWorldCustomTime = (u: LavaWorldUniforms, t: number): void => {
+    u.land.time.value = t * getMultiplier(LAND.size, LAND.timeSpeed)
+    u.craters.time.value = t * getMultiplier(CRATERS.size, CRATERS.timeSpeed)
+    u.lavaRivers.time.value = t * getMultiplier(LAVA_RIVERS.size, LAVA_RIVERS.timeSpeed)
+}
+
 export const createLavaWorld = (rootSeed: number) => {
     const uniforms = createLavaWorldUniforms(rootSeed)
     const planet = new Group()

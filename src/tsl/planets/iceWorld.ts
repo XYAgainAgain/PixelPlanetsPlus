@@ -37,6 +37,12 @@ export const updateIceWorldTime = (u: IceWorldUniforms, t: number): void => {
     u.clouds.time.value = t * CLOUDS_TIME
 }
 
+export const setIceWorldCustomTime = (u: IceWorldUniforms, t: number): void => {
+    u.land.time.value = t * getMultiplier(LAND.size, LAND.timeSpeed)
+    u.lakes.time.value = t * getMultiplier(LAKES.size, LAKES.timeSpeed)
+    u.clouds.time.value = t * getMultiplier(CLOUDS.size, CLOUDS.timeSpeed)
+}
+
 export const createIceWorld = (rootSeed: number) => {
     const uniforms = createIceWorldUniforms(rootSeed)
     const planet = new Group()

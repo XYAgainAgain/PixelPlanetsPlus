@@ -33,6 +33,11 @@ export const updateNoAtmosphereTime = (u: NoAtmosphereUniforms, t: number): void
     u.craters.time.value = t * CRATERS_TIME
 }
 
+export const setNoAtmosphereCustomTime = (u: NoAtmosphereUniforms, t: number): void => {
+    u.ground.time.value = t * getMultiplier(GROUND.size, GROUND.timeSpeed)
+    u.craters.time.value = t * getMultiplier(CRATERS.size, CRATERS.timeSpeed)
+}
+
 export const createNoAtmosphere = (rootSeed: number) => {
     const uniforms = createNoAtmosphereUniforms(rootSeed)
     const planet = new Group()

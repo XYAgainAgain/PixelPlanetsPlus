@@ -31,6 +31,11 @@ export const updateGasGiant2Time = (u: GasGiant2Uniforms, t: number): void => {
     u.ring.time.value = t * RING_TIME_MULT
 }
 
+export const setGasGiant2CustomTime = (u: GasGiant2Uniforms, t: number): void => {
+    u.gasLayers.time.value = t * getMultiplier(GAS_LAYERS.size, GAS_LAYERS.timeSpeed)
+    u.ring.time.value = t * 314.15 * RING.timeSpeed * 0.5
+}
+
 export const createGasGiant2 = (rootSeed: number) => {
     const uniforms = createGasGiant2Uniforms(rootSeed)
     const gasGiant = new Group()

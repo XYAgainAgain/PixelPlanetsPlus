@@ -41,6 +41,11 @@ export const updateTerranWetTime = (u: TerranWetUniforms, t: number): void => {
     u.clouds.time.value = t * CLOUD_TIME
 }
 
+export const setTerranWetCustomTime = (u: TerranWetUniforms, t: number): void => {
+    u.clouds.time.value = t * getMultiplier(CLOUD.size, CLOUD.timeSpeed) * 0.5
+    u.land.time.value = t * getMultiplier(LAND.size, LAND.timeSpeed)
+}
+
 export const createTerranWet = (rootSeed: number) => {
     const uniforms = createTerranWetUniforms(rootSeed)
     const terranWet = new Group()

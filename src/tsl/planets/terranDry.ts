@@ -30,6 +30,10 @@ export const updateTerranDryTime = (u: TerranDryUniforms, t: number): void => {
     u.land.time.value = t * LAND_TIME
 }
 
+export const setTerranDryCustomTime = (u: TerranDryUniforms, t: number): void => {
+    u.land.time.value = t * getMultiplier(LAND.size, LAND.timeSpeed)
+}
+
 export const createTerranDry = (rootSeed: number) => {
     const uniforms = createTerranDryUniforms(rootSeed)
     const terranDry = new Group()

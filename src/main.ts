@@ -1,8 +1,14 @@
 import { LinearSRGBColorSpace, Mesh, PerspectiveCamera, Scene, WebGPURenderer } from 'three/webgpu'
 import { BACKGROUND_MODES, createBackground, type BackgroundMode } from './background'
 import { Color } from './palette'
+import { createSceneComposer, type SceneComposer } from './export/composer'
+import { decodeSceneRecipe, encodeSceneRecipe, SCENE_SCHEMA } from './export/recipe'
+import { bodyLocalToLightUv, lightUvToBodyLocal } from './export/runtime'
+import type { BackdropV1, SceneRecipeV1 } from './export/types'
+import { decodeWorldParams, encodeWorldParams } from './export/worldParams'
 import { LAND_PHASE_PER_QUAD } from './tsl/planets/islands'
 import { PLANET_FACTORIES, createPlanet, type PlanetRuntime } from './tsl/registry'
+import { PLANETS, type PlanetTypeId } from './tsl/values'
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
     const el = document.getElementById(id)
@@ -12,14 +18,8 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
 
 const seedFromUrl = (): number => {
     const raw = new URLSearchParams(location.search).get('seed')
-    const n = raw === null ? NaN : Number.parseInt(raw, 10)
-    return Number.isFinite(n) ? n : Math.floor(Math.random() * 1_000_000)
-}
-
-const writeSeedToUrl = (seed: number): void => {
-    const url = new URL(location.href)
-    url.searchParams.set('seed', String(seed))
-    history.replaceState(null, '', url)
+    const n = raw === null ? NaN : Number(raw)
+    return Number.isSafeInteger(n) && n >= 0 ? n : Math.floor(Math.random() * 1_000_000)
 }
 
 const backgroundFromUrl = (): BackgroundMode => {
@@ -27,10 +27,44 @@ const backgroundFromUrl = (): BackgroundMode => {
     return BACKGROUND_MODES.find((mode) => mode.toLowerCase() === raw?.toLowerCase()) ?? 'Stars'
 }
 
-const writeBackgroundToUrl = (mode: BackgroundMode): void => {
-    const url = new URL(location.href)
-    url.searchParams.set('background', mode.toLowerCase())
-    history.replaceState(null, '', url)
+const sceneFromUrl = (): { recipe: SceneRecipeV1 | null, warning: string | null } => {
+    const payload = new URLSearchParams(location.search).get('scene')
+    if (payload === null) return { recipe: null, warning: null }
+    try {
+        return { recipe: decodeSceneRecipe(payload), warning: null }
+    } catch (error) {
+        console.error('Scene link could not be decoded.', error)
+        return {
+            recipe: null,
+            warning: "That link didn't load quite right, so we started you off with a fresh planet instead.",
+        }
+    }
+}
+
+const WORLD_PARAM_KEYS = ['t', 's', 'p', 'r', 'ti', 'd', 'l', 'bg', 'bs', 'pal'] as const
+
+const hasWorldParams = (params: URLSearchParams): boolean => WORLD_PARAM_KEYS.some((key) => params.has(key))
+
+const planetId = (planet: PlanetRuntime): PlanetTypeId => {
+    const entry = Object.entries(PLANETS).find(([, metadata]) => metadata.name === planet.metadata.name)
+    if (!entry) throw new Error(`unknown celestial body: ${planet.metadata.name}`)
+    return entry[0] as PlanetTypeId
+}
+
+const liveBackdropRecipe = (mode: BackgroundMode, seed: number, phase: number): BackdropV1 => {
+    const gradientPhase = ((phase % 1) + 1) % 1
+    const backdrop = { seed, density: 1, brightness: 1, starScale: 1, specialStarMix: 0.5, gradientPhase }
+    if (mode === 'None') return { kind: 'transparent' }
+    if (mode === 'Stars') return { kind: 'stars', ...backdrop }
+    if (mode === 'Gradient') return { kind: 'gradient', ...backdrop }
+    return { kind: 'stars-gradient', ...backdrop }
+}
+
+const backgroundModeForRecipe = (backdrop: BackdropV1): BackgroundMode => {
+    if (backdrop.kind === 'stars') return 'Stars'
+    if (backdrop.kind === 'gradient') return 'Gradient'
+    if (backdrop.kind === 'stars-gradient') return 'Stars on Gradient'
+    return 'None'
 }
 
 const framingScale = (planet: PlanetRuntime, stageAspect: number): number => {
@@ -56,8 +90,20 @@ async function init(): Promise<void> {
     // Renderer canvases mount here, not on #stage: the aberration filter must not touch text
     const canvasStack = $('canvas-stack')
     const starCanvas = $<HTMLCanvasElement>('star-layer')
-    let seed = seedFromUrl()
-    writeSeedToUrl(seed)
+    const urlParams = new URLSearchParams(location.search)
+    const decodedScene = sceneFromUrl()
+    let loadedScene = decodedScene.recipe
+    const hasLegacyParams = urlParams.has('seed') || urlParams.has('background')
+    const seededWorldDefaults = decodeWorldParams(new URLSearchParams())
+    const decodedWorld = loadedScene || decodedScene.warning || !hasWorldParams(urlParams) ? null : decodeWorldParams(urlParams)
+    const loadedWorld = decodedWorld
+        ? {
+            ...seededWorldDefaults,
+            ...decodedWorld,
+            body: { ...seededWorldDefaults.body, ...decodedWorld.body },
+        }
+        : null
+    let seed = loadedScene?.seed ?? loadedWorld?.seed ?? (decodedScene.warning || !hasLegacyParams ? 1 : seedFromUrl())
     const seedInput = $<HTMLInputElement>('seed-value')
     seedInput.value = String(seed)
 
@@ -133,7 +179,23 @@ async function init(): Promise<void> {
     const camera = new PerspectiveCamera(75, 1, 0.1, 100000)
     camera.position.z = 1
 
-    let planet = createPlanet('Islands', seed)
+    const loadedRecipe = loadedScene ?? loadedWorld
+    let planet = createPlanet(loadedRecipe?.celestialType ? PLANETS[loadedRecipe.celestialType].name : 'Islands', seed)
+    let defaultLight = planet.lightOrigin
+        ? lightUvToBodyLocal([planet.lightOrigin.value.x, planet.lightOrigin.value.y])
+        : null
+    if (loadedRecipe) {
+        planet.pixels.value = loadedRecipe.pixels ?? planet.pixels.value
+        planet.rotation.value = loadedRecipe.body?.rotation ?? planet.rotation.value
+        planet.setDither(loadedRecipe.dither ?? true)
+        if (loadedRecipe.palette) planet.palette.setColors(loadedRecipe.palette.flat().map(Color.fromHex))
+        const layerIndices = new Map(planet.metadata.layers.map((layer, index) => [layer.node, index]))
+        for (const layer of loadedRecipe.layers ?? []) {
+            const index = layerIndices.get(layer.id)
+            if (index !== undefined) planet.setLayerVisible(index, layer.visible)
+        }
+        if (loadedRecipe.body?.light && planet.lightOrigin) planet.lightOrigin.value.set(...bodyLocalToLightUv(loadedRecipe.body.light))
+    }
     scene.add(planet.group)
     const safeBackground = (mode: BackgroundMode, backgroundSeed: number) => {
         try {
@@ -143,7 +205,10 @@ async function init(): Promise<void> {
             return createBackground('None', backgroundSeed, starCanvas)
         }
     }
-    let background = safeBackground(backgroundFromUrl(), seed)
+    let backgroundSeed = loadedRecipe?.backdrop && 'seed' in loadedRecipe.backdrop ? loadedRecipe.backdrop.seed : seed
+    let background = safeBackground(loadedRecipe?.backdrop
+        ? backgroundModeForRecipe(loadedRecipe.backdrop)
+        : decodedScene.warning ? 'Stars' : backgroundFromUrl(), backgroundSeed)
 
     let canvas = renderer.domElement
     const rendererLimit = (): number => {
@@ -224,6 +289,9 @@ async function init(): Promise<void> {
         canvas.remove()
         disposePlanet(planet)
         planet = createPlanet('Islands', seed)
+        defaultLight = planet.lightOrigin
+            ? lightUvToBodyLocal([planet.lightOrigin.value.x, planet.lightOrigin.value.y])
+            : null
         scene.add(planet.group)
         renderer = await initializeForcedWebGL()
         rendererWasForced = true
@@ -237,6 +305,13 @@ async function init(): Promise<void> {
         console.info('First frame presented with forced WebGL after WebGPU first-frame failure.')
     }
     $('stage-placeholder').remove()
+    if (decodedScene.warning) {
+        const warning = document.createElement('p')
+        warning.className = 'absolute top-3 left-1/2 z-20 max-w-xl -translate-x-1/2 rounded border border-amber-700 bg-amber-950/95 px-3 py-2 text-xs text-amber-100'
+        warning.setAttribute('role', 'status')
+        warning.textContent = decodedScene.warning
+        stage.appendChild(warning)
+    }
 
     // Drag does two things depending on where it starts: off the disc it moves the light like
     // the Godot original, on the disc it spins the planet. Mode locks at pointerdown.
@@ -274,12 +349,14 @@ async function init(): Promise<void> {
         } else {
             planet.lightOrigin?.value.set(uv.x, uv.y)
         }
+        scheduleSceneUrl()
     }
 
     // Each layer scrolls the shared phase at its own Godot-derived rate, so phase is just
     // Godot's seconds and slider 0.1 means 1×: one full surface wrap every 25 seconds.
     let speed = -0.1
-    let phase = 0
+    let phase = loadedRecipe?.body?.phase ?? 0
+    let sharedPhase = phase
     let last = -1
     // Leftover phase rate from a flick, in phase units per second, decaying back to baseline
     let momentum = 0
@@ -326,6 +403,8 @@ async function init(): Promise<void> {
         const dt = now - lastDragT
         const dPhase = (uv.x - lastDragX) * SCRUB_PER_UV
         phase = (phase + dPhase + PHASE_WRAP) % PHASE_WRAP
+        sharedPhase = phase
+        scheduleSceneUrl()
         if (dt > 0) {
             const v = Math.max(-MAX_FLICK, Math.min(MAX_FLICK, dPhase / dt))
             // Blend so one stuttering frame can't define the flick; the first sample of a
@@ -383,7 +462,7 @@ async function init(): Promise<void> {
             if (background.mode === 'None') throw error
             console.error('Background rendering failed; continuing with black.', error)
             background.dispose()
-            background = safeBackground('None', seed)
+            background = safeBackground('None', backgroundSeed)
             renderer.render(scene, camera)
         }
     }
@@ -459,17 +538,15 @@ async function init(): Promise<void> {
     // Controls
     const typeSelect = $<HTMLSelectElement>('planet-type')
     typeSelect.replaceChildren(...PLANET_FACTORIES.map(({ metadata }) => new Option(metadata.name, metadata.name)))
-    typeSelect.value = 'Islands'
+    typeSelect.value = planet.metadata.name
     const backgroundSelect = $<HTMLSelectElement>('background-mode')
     backgroundSelect.value = background.mode
-    writeBackgroundToUrl(background.mode)
 
     backgroundSelect.addEventListener('change', () => {
         const outgoing = background
-        background = safeBackground(backgroundSelect.value as BackgroundMode, seed)
+        background = safeBackground(backgroundSelect.value as BackgroundMode, backgroundSeed)
         outgoing.dispose()
         background.resize(stage.clientWidth, stage.clientHeight, planet.pixels.value)
-        writeBackgroundToUrl(background.mode)
     })
 
     const pixelsInput = $<HTMLInputElement>('pixels')
@@ -532,8 +609,10 @@ async function init(): Promise<void> {
     }
 
     const syncPlanetControls = (): void => {
-        planet.pixels.value = Number(pixelsNumber.value)
-        planet.rotation.value = Number(tiltInput.value)
+        if (!loadedScene) {
+            planet.pixels.value = Number(pixelsNumber.value)
+            planet.rotation.value = Number(tiltInput.value)
+        }
         syncFraming()
         syncDither()
         syncLayers()
@@ -545,6 +624,11 @@ async function init(): Promise<void> {
     typeSelect.addEventListener('change', () => {
         const outgoing = planet
         planet = createPlanet(typeSelect.value, seed)
+        planet.pixels.value = Number(pixelsNumber.value)
+        planet.rotation.value = Number(tiltInput.value)
+        defaultLight = planet.lightOrigin
+            ? lightUvToBodyLocal([planet.lightOrigin.value.x, planet.lightOrigin.value.y])
+            : null
         scene.add(planet.group)
         disposePlanet(outgoing)
         syncPlanetControls()
@@ -552,24 +636,24 @@ async function init(): Promise<void> {
 
     $('seed-reroll').addEventListener('click', () => {
         seed = Math.floor(Math.random() * 1_000_000)
+        backgroundSeed = seed
         planet.reseed(seed)
-        background.reseed(seed)
-        writeSeedToUrl(seed)
+        background.reseed(backgroundSeed)
         seedInput.value = String(seed)
         syncPalette()
     })
 
     const applySeedInput = (): void => {
-        const next = Number.parseInt(seedInput.value, 10)
-        if (!Number.isFinite(next)) {
+        const next = Number(seedInput.value)
+        if (!Number.isSafeInteger(next) || next < 0) {
             seedInput.value = String(seed)
             return
         }
         seed = next
+        backgroundSeed = seed
         seedInput.value = String(seed)
         planet.reseed(seed)
-        background.reseed(seed)
-        writeSeedToUrl(seed)
+        background.reseed(backgroundSeed)
         syncPalette()
     }
     seedInput.addEventListener('change', applySeedInput)
@@ -681,6 +765,147 @@ async function init(): Promise<void> {
     })
 
     syncPlanetControls()
+
+    if (loadedRecipe) {
+        pixelsInput.value = String(loadedRecipe.pixels ?? planet.pixels.value)
+        pixelsNumber.value = String(loadedRecipe.pixels ?? planet.pixels.value)
+        tiltInput.value = String(loadedRecipe.body?.rotation ?? planet.rotation.value)
+        ditherInput.checked = loadedRecipe.dither ?? true
+        syncPlanetControls()
+    }
+
+    const liveExportCanvasSize = (): { width: number, height: number } => {
+        const aspect = stage.clientWidth / Math.max(1, stage.clientHeight)
+        return aspect >= 1
+            ? { width: 1920, height: Math.max(1, Math.round(1920 / aspect)) }
+            : { width: Math.max(1, Math.round(1920 * aspect)), height: 1920 }
+    }
+    const makeCurrentRecipe = (): SceneRecipeV1 => {
+        const canvasSize = liveExportCanvasSize()
+        const source = composer?.recipe()
+        const composing = !$('export-workspace').hidden
+        const largestLayer = Math.max(...planet.metadata.layers.map((layer) => layer.quadScale))
+        const currentBodySize = largestLayer * stage.clientHeight * framingScale(planet, camera.aspect)
+            / (2 * Math.tan((camera.fov * Math.PI) / 360)) / Math.max(1, Math.min(stage.clientWidth, stage.clientHeight))
+        return {
+            schema: SCENE_SCHEMA,
+            celestialType: planetId(planet),
+            canvas: composing ? source?.canvas ?? canvasSize : loadedScene?.canvas ?? canvasSize,
+            body: {
+                center: composing ? source?.body.center ?? [0.5, 0.5] : loadedScene?.body.center ?? [0.5, 0.5],
+                size: composing ? source?.body.size ?? currentBodySize : loadedScene?.body.size ?? currentBodySize,
+                phase: composing ? source?.body.phase ?? sharedPhase % 1 : loadedScene?.body.phase ?? sharedPhase % 1,
+                rotation: planet.rotation.value,
+                light: composing ? source?.body.light ?? null : loadedScene?.body.light
+                    ?? (planet.lightOrigin
+                        ? lightUvToBodyLocal([planet.lightOrigin.value.x, planet.lightOrigin.value.y])
+                        : null),
+            },
+            seed,
+            pixels: planet.pixels.value,
+            palette: [planet.palette.colors().map((color) => color.toHex())],
+            layers: planet.metadata.layers.map((layer, index) => ({ id: layer.node, visible: planet.group.children[index]?.visible ?? true })),
+            dither: ditherInput.checked,
+            backdrop: composing ? source?.backdrop ?? liveBackdropRecipe(background.mode, backgroundSeed, 0)
+                : loadedScene?.backdrop ?? liveBackdropRecipe(background.mode, backgroundSeed, 0),
+            export: composing ? source?.export ?? loadedScene?.export ?? {
+                scale: 1, frameCount: 60, columns: 8, margin: 0,
+                startPhase: 0, endPhase: 1, direction: 'forward', framesPerSecond: 12,
+            } : loadedScene?.export ?? source?.export ?? {
+                scale: 1, frameCount: 60, columns: 8, margin: 0,
+                startPhase: 0, endPhase: 1, direction: 'forward', framesPerSecond: 12,
+            },
+            effects: composing ? source?.effects ?? [] : loadedScene?.effects ?? [],
+        }
+    }
+    let sceneWriteTimer = 0
+    const samePair = (left: readonly [number, number] | null, right: readonly [number, number] | null): boolean =>
+        left === right || (left !== null && right !== null && left[0] === right[0] && left[1] === right[1])
+    const needsSceneUrl = (recipe: SceneRecipeV1): boolean => {
+        const canvasSize = liveExportCanvasSize()
+        const largestLayer = Math.max(...planet.metadata.layers.map((layer) => layer.quadScale))
+        const defaultSize = largestLayer * stage.clientHeight * framingScale(planet, camera.aspect)
+            / (2 * Math.tan((camera.fov * Math.PI) / 360)) / Math.max(1, Math.min(stage.clientWidth, stage.clientHeight))
+        const backdrop = recipe.backdrop
+        const customBackdrop = backdrop.kind === 'solid' || (backdrop.kind !== 'transparent'
+            && (backdrop.density !== 1 || backdrop.brightness !== 1 || backdrop.starScale !== 1
+                || backdrop.specialStarMix !== 0.5 || backdrop.gradientPhase !== 0))
+        // The composer derives its framing from the stage, so compare loosely: rounding alone is not a customization.
+        const near = (value: number, reference: number, tolerance = 1e-4): boolean => Math.abs(value - reference) <= tolerance
+        return !near(recipe.canvas.width, canvasSize.width, 1) || !near(recipe.canvas.height, canvasSize.height, 1)
+            || !near(recipe.body.center[0], 0.5) || !near(recipe.body.center[1], 0.5) || !near(recipe.body.size, defaultSize, 1e-3)
+            || !samePair(recipe.body.light, defaultLight) || customBackdrop
+            || recipe.export.scale !== 1 || recipe.export.frameCount !== 60 || recipe.export.columns !== 8
+            || recipe.export.margin !== 0 || recipe.export.startPhase !== 0 || recipe.export.endPhase !== 1
+            || recipe.export.direction !== 'forward' || recipe.export.framesPerSecond !== 12 || recipe.effects.length !== 0
+    }
+    const scheduleSceneUrl = (): void => {
+        window.clearTimeout(sceneWriteTimer)
+        sceneWriteTimer = window.setTimeout(() => {
+            try {
+                const url = new URL(location.href)
+                const recipe = makeCurrentRecipe()
+                url.searchParams.delete('scene')
+                url.searchParams.delete('seed')
+                url.searchParams.delete('background')
+                for (const key of WORLD_PARAM_KEYS) url.searchParams.delete(key)
+                if (needsSceneUrl(recipe)) {
+                    url.searchParams.set('scene', encodeSceneRecipe(recipe))
+                } else {
+                    for (const [key, value] of encodeWorldParams(recipe)) url.searchParams.set(key, value)
+                }
+                history.replaceState(null, '', url)
+            } catch (error: unknown) {
+                console.error('Scene URL update failed.', error)
+            }
+        }, 300)
+    }
+    let composer: SceneComposer | null = null
+    composer = createSceneComposer({
+        stage,
+        backend: () => rendererWasForced ? 'webgl' : 'webgpu',
+        textureLimit: () => {
+            try {
+                const backend = renderer.backend as unknown as {
+                    device?: { limits?: { maxTextureDimension2D?: number } }
+                    gl?: WebGLRenderingContext | WebGL2RenderingContext
+                }
+                const webGpuLimit = backend.device?.limits?.maxTextureDimension2D
+                if (webGpuLimit) return webGpuLimit
+                if (backend.gl) {
+                    const webGlLimit = Number(backend.gl.getParameter(backend.gl.MAX_TEXTURE_SIZE))
+                    if (Number.isFinite(webGlLimit) && webGlLimit > 0) return webGlLimit
+                }
+            } catch {
+                // The conservative fallback is only used when neither backend exposes its real limit.
+            }
+            return 4096
+        },
+        currentRecipe: makeCurrentRecipe,
+        onRecipeChange: (recipe) => { loadedScene = recipe; scheduleSceneUrl() },
+        onClose: (_recipe, changed) => {
+            if (changed) loadedScene = _recipe
+            scheduleSceneUrl()
+        },
+    })
+    if (loadedScene) composer.replaceRecipe(loadedScene)
+    for (const format of ['png', 'gif', 'spritesheet'] as const) {
+        $(`export-${format}`).addEventListener('click', () => { composer?.open(format) })
+    }
+    const liveControls = [typeSelect, pixelsInput, pixelsNumber, tiltInput, ditherInput, palettePicker]
+    for (const control of liveControls) {
+        control.addEventListener('input', () => { composer?.refreshFromLive(); scheduleSceneUrl() })
+        control.addEventListener('change', () => { composer?.refreshFromLive(); scheduleSceneUrl() })
+    }
+    for (const control of [backgroundSelect, seedInput]) {
+        control.addEventListener('input', () => { composer?.refreshFromLive(); scheduleSceneUrl() })
+        control.addEventListener('change', () => { composer?.refreshFromLive(); scheduleSceneUrl() })
+    }
+    layerOptions.addEventListener('change', scheduleSceneUrl)
+    $('seed-reroll').addEventListener('click', scheduleSceneUrl)
+    $('palette-random').addEventListener('click', scheduleSceneUrl)
+    $('palette-reset').addEventListener('click', scheduleSceneUrl)
+    scheduleSceneUrl()
 }
 
 init().catch((err: unknown) => {

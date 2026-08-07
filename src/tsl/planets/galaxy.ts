@@ -29,6 +29,10 @@ export const updateGalaxyTime = (u: GalaxyUniforms, t: number): void => {
     u.galaxy.time.value = t * GALAXY_TIME
 }
 
+export const setGalaxyCustomTime = (u: GalaxyUniforms, t: number): void => {
+    u.galaxy.time.value = t * Math.PI * 2 * GALAXY.timeSpeed
+}
+
 export const createGalaxy = (rootSeed: number) => {
     const uniforms = createGalaxyUniforms(rootSeed)
     const galaxy = new Group()

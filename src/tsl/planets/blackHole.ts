@@ -28,6 +28,10 @@ export const updateBlackHoleTime = (u: BlackHoleUniforms, t: number): void => {
     u.disk.time.value = t * DISK_TIME
 }
 
+export const setBlackHoleCustomTime = (u: BlackHoleUniforms, t: number): void => {
+    u.disk.time.value = t * 314.15 * DISK.timeSpeed * 0.5
+}
+
 export const createBlackHole = (rootSeed: number) => {
     const uniforms = createBlackHoleUniforms(rootSeed)
     const blackHole = new Group()

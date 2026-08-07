@@ -3,18 +3,18 @@ import { convertSeed } from '../rng'
 import { Color } from '../palette'
 import { createPaletteController, type PaletteController, type PaletteTarget } from '../paletteSystem'
 import type { PlanetValues } from './values'
-import { createAsteroid, asteroidMetadata, reseedAsteroid, updateAsteroidTime } from './planets/asteroid'
-import { createBlackHole, blackHoleMetadata, reseedBlackHole, updateBlackHoleTime } from './planets/blackHole'
-import { createGalaxy, galaxyMetadata, reseedGalaxy, updateGalaxyTime } from './planets/galaxy'
-import { createGasGiant1, gasGiant1Metadata, reseedGasGiant1, updateGasGiant1Time } from './planets/gasGiant1'
-import { createGasGiant2, gasGiant2Metadata, reseedGasGiant2, updateGasGiant2Time } from './planets/gasGiant2'
-import { createIceWorld, reseedIceWorld, updateIceWorldTime } from './planets/iceWorld'
-import { createIslands, reseedIslands, updateIslandsTime } from './planets/islands'
-import { createLavaWorld, reseedLavaWorld, updateLavaWorldTime } from './planets/lavaWorld'
-import { createNoAtmosphere, reseedNoAtmosphere, updateNoAtmosphereTime } from './planets/noAtmosphere'
-import { createStar, starMetadata, reseedStar, updateStarTime } from './planets/star'
-import { createTerranDry, terranDryMetadata, reseedTerranDry, updateTerranDryTime } from './planets/terranDry'
-import { createTerranWet, terranWetMetadata, reseedTerranWet, updateTerranWetTime } from './planets/terranWet'
+import { createAsteroid, asteroidMetadata, reseedAsteroid, setAsteroidCustomTime, updateAsteroidTime } from './planets/asteroid'
+import { createBlackHole, blackHoleMetadata, reseedBlackHole, setBlackHoleCustomTime, updateBlackHoleTime } from './planets/blackHole'
+import { createGalaxy, galaxyMetadata, reseedGalaxy, setGalaxyCustomTime, updateGalaxyTime } from './planets/galaxy'
+import { createGasGiant1, gasGiant1Metadata, reseedGasGiant1, setGasGiant1CustomTime, updateGasGiant1Time } from './planets/gasGiant1'
+import { createGasGiant2, gasGiant2Metadata, reseedGasGiant2, setGasGiant2CustomTime, updateGasGiant2Time } from './planets/gasGiant2'
+import { createIceWorld, reseedIceWorld, setIceWorldCustomTime, updateIceWorldTime } from './planets/iceWorld'
+import { createIslands, reseedIslands, setIslandsCustomTime, updateIslandsTime } from './planets/islands'
+import { createLavaWorld, reseedLavaWorld, setLavaWorldCustomTime, updateLavaWorldTime } from './planets/lavaWorld'
+import { createNoAtmosphere, reseedNoAtmosphere, setNoAtmosphereCustomTime, updateNoAtmosphereTime } from './planets/noAtmosphere'
+import { createStar, starMetadata, reseedStar, setStarCustomTime, updateStarTime } from './planets/star'
+import { createTerranDry, terranDryMetadata, reseedTerranDry, setTerranDryCustomTime, updateTerranDryTime } from './planets/terranDry'
+import { createTerranWet, terranWetMetadata, reseedTerranWet, setTerranWetCustomTime, updateTerranWetTime } from './planets/terranWet'
 import { PLANETS } from './values'
 
 interface NumberUniform {
@@ -33,6 +33,7 @@ export interface PlanetRuntime {
     metadata: PlanetValues
     reseed: (seed: number) => void
     updateTime: (time: number) => void
+    setExportPhase: (phase: number) => void
     setDither: (enabled: boolean) => void
     setLayerVisible: (index: number, visible: boolean) => void
     palette: PaletteController
@@ -50,6 +51,7 @@ const runtime = <U extends CommonUniforms>(
     created: { group: Group, uniforms: U },
     reseed: (uniforms: U, seed: number) => void,
     updateTime: (uniforms: U, time: number) => void,
+    setExportPhase: (uniforms: U, phase: number) => void,
     ditherUniforms: readonly NumberUniform[],
     paletteGroups: readonly (readonly PaletteTarget[])[],
     rootSeed: number,
@@ -68,6 +70,7 @@ const runtime = <U extends CommonUniforms>(
             palette.setSeed(seed)
         },
         updateTime: (time) => { updateTime(created.uniforms, time) },
+        setExportPhase: (phase) => { setExportPhase(created.uniforms, phase) },
         setDither: (enabled) => {
             for (const uniform of ditherUniforms) uniform.value = enabled ? 1 : 0
         },
@@ -92,17 +95,17 @@ const arrayTargets = (array: readonly unknown[]): PaletteTarget[] => vectorTarge
 export const PLANET_FACTORIES = [
     { metadata: terranWetMetadata, create: (seed: number) => {
         const p = createTerranWet(seed)
-        return runtime(terranWetMetadata, p, reseedTerranWet, updateTerranWetTime,
+        return runtime(terranWetMetadata, p, reseedTerranWet, updateTerranWetTime, setTerranWetCustomTime,
             [p.uniforms.land.shouldDither], [uniformTargets(p.uniforms.land.colors), uniformTargets(p.uniforms.clouds.colors)], seed)
     } },
     { metadata: terranDryMetadata, create: (seed: number) => {
         const p = createTerranDry(seed)
-        return runtime(terranDryMetadata, p, reseedTerranDry, updateTerranDryTime,
+        return runtime(terranDryMetadata, p, reseedTerranDry, updateTerranDryTime, setTerranDryCustomTime,
             [p.uniforms.land.shouldDither], [arrayTargets(p.uniforms.land.colors.array)], seed)
     } },
     { metadata: PLANETS.islands, create: (seed: number) => {
         const p = createIslands(seed)
-        return runtime(PLANETS.islands, p, reseedIslands, updateIslandsTime,
+        return runtime(PLANETS.islands, p, reseedIslands, updateIslandsTime, setIslandsCustomTime,
             [p.uniforms.water.shouldDither], [
                 uniformTargets(p.uniforms.water.colors), uniformTargets(p.uniforms.land.colors),
                 uniformTargets(p.uniforms.clouds.colors), uniformTargets(p.uniforms.atmosphere.colors),
@@ -110,17 +113,17 @@ export const PLANET_FACTORIES = [
     } },
     { metadata: PLANETS.noAtmosphere, create: (seed: number) => {
         const p = createNoAtmosphere(seed)
-        return runtime(PLANETS.noAtmosphere, p, reseedNoAtmosphere, updateNoAtmosphereTime,
+        return runtime(PLANETS.noAtmosphere, p, reseedNoAtmosphere, updateNoAtmosphereTime, setNoAtmosphereCustomTime,
             [p.uniforms.ground.shouldDither], [uniformTargets(p.uniforms.ground.colors), uniformTargets(p.uniforms.craters.colors)], seed)
     } },
     { metadata: gasGiant1Metadata, create: (seed: number) => {
         const p = createGasGiant1(seed)
-        return runtime(gasGiant1Metadata, p, reseedGasGiant1, updateGasGiant1Time, [],
+        return runtime(gasGiant1Metadata, p, reseedGasGiant1, updateGasGiant1Time, setGasGiant1CustomTime, [],
             [uniformTargets(p.uniforms.cloud.colors), uniformTargets(p.uniforms.cloud2.colors)], seed)
     } },
     { metadata: gasGiant2Metadata, create: (seed: number) => {
         const p = createGasGiant2(seed)
-        return runtime(gasGiant2Metadata, p, reseedGasGiant2, updateGasGiant2Time,
+        return runtime(gasGiant2Metadata, p, reseedGasGiant2, updateGasGiant2Time, setGasGiant2CustomTime,
             [p.uniforms.gasLayers.shouldDither], [
                 uniformTargets(p.uniforms.gasLayers.colors), uniformTargets(p.uniforms.gasLayers.darkColors),
                 uniformTargets(p.uniforms.ring.colors), uniformTargets(p.uniforms.ring.darkColors),
@@ -130,32 +133,32 @@ export const PLANET_FACTORIES = [
     } },
     { metadata: PLANETS.iceWorld, create: (seed: number) => {
         const p = createIceWorld(seed)
-        return runtime(PLANETS.iceWorld, p, reseedIceWorld, updateIceWorldTime,
+        return runtime(PLANETS.iceWorld, p, reseedIceWorld, updateIceWorldTime, setIceWorldCustomTime,
             [p.uniforms.land.shouldDither], [uniformTargets(p.uniforms.land.colors), uniformTargets(p.uniforms.lakes.colors), uniformTargets(p.uniforms.clouds.colors)], seed)
     } },
     { metadata: PLANETS.lavaWorld, create: (seed: number) => {
         const p = createLavaWorld(seed)
-        return runtime(PLANETS.lavaWorld, p, reseedLavaWorld, updateLavaWorldTime,
+        return runtime(PLANETS.lavaWorld, p, reseedLavaWorld, updateLavaWorldTime, setLavaWorldCustomTime,
             [p.uniforms.land.shouldDither], [uniformTargets(p.uniforms.land.colors), uniformTargets(p.uniforms.craters.colors), uniformTargets(p.uniforms.lavaRivers.colors)], seed)
     } },
     { metadata: asteroidMetadata, create: (seed: number) => {
         const p = createAsteroid(seed)
-        return runtime(asteroidMetadata, p, reseedAsteroid, updateAsteroidTime,
+        return runtime(asteroidMetadata, p, reseedAsteroid, updateAsteroidTime, setAsteroidCustomTime,
             [p.uniforms.asteroid.shouldDither], [uniformTargets(p.uniforms.asteroid.colors)], seed)
     } },
     { metadata: blackHoleMetadata, create: (seed: number) => {
         const p = createBlackHole(seed)
-        return runtime(blackHoleMetadata, p, reseedBlackHole, updateBlackHoleTime,
+        return runtime(blackHoleMetadata, p, reseedBlackHole, updateBlackHoleTime, setBlackHoleCustomTime,
             [p.uniforms.disk.shouldDither], [uniformTargets(p.uniforms.core.colors), uniformTargets(p.uniforms.disk.colors)], seed)
     } },
     { metadata: galaxyMetadata, create: (seed: number) => {
         const p = createGalaxy(seed)
-        return runtime(galaxyMetadata, p, reseedGalaxy, updateGalaxyTime,
+        return runtime(galaxyMetadata, p, reseedGalaxy, updateGalaxyTime, setGalaxyCustomTime,
             [p.uniforms.galaxy.shouldDither], [arrayTargets(p.uniforms.galaxy.colors.array)], seed)
     } },
     { metadata: starMetadata, create: (seed: number) => {
         const p = createStar(seed)
-        return runtime(starMetadata, p, reseedStar, updateStarTime, [
+        return runtime(starMetadata, p, reseedStar, updateStarTime, setStarCustomTime, [
             p.uniforms.surface.shouldDither,
             p.uniforms.flares.shouldDither,
         ], [uniformTargets(p.uniforms.blobs.colors), uniformTargets(p.uniforms.surface.colors), uniformTargets(p.uniforms.flares.colors)], seed)

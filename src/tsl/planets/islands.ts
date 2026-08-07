@@ -58,6 +58,12 @@ export const updateIslandsTime = (u: IslandsUniforms, t: number): void => {
     u.clouds.time.value = t * CLOUD_TIME
 }
 
+export const setIslandsCustomTime = (u: IslandsUniforms, t: number): void => {
+    u.clouds.time.value = t * getMultiplier(CLOUD.size, CLOUD.timeSpeed)
+    u.water.time.value = t * getMultiplier(WATER.size, WATER.timeSpeed)
+    u.land.time.value = t * getMultiplier(LAND.size, LAND.timeSpeed)
+}
+
 export const createIslands = (rootSeed: number) => {
     const uniforms = createIslandsUniforms(rootSeed)
     const islands = new Group()

@@ -53,6 +53,12 @@ export const updateStarTime = (u: StarUniforms, t: number): void => {
     u.flares.time.value = t * FLARES_TIME
 }
 
+export const setStarCustomTime = (u: StarUniforms, t: number): void => {
+    u.blobs.time.value = t * getMultiplier(BLOBS.size, BLOBS.timeSpeed)
+    u.surface.time.value = t * (1.0 / SURFACE.timeSpeed)
+    u.flares.time.value = t * getMultiplier(FLARES.size, FLARES.timeSpeed)
+}
+
 export const createStar = (rootSeed: number) => {
     const uniforms = createStarUniforms(rootSeed)
     const star = new Group()

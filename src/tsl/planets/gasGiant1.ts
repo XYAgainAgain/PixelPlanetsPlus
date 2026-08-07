@@ -40,6 +40,11 @@ export const updateGasGiant1Time = (u: GasGiant1Uniforms, t: number): void => {
     u.cloud2.time.value = t * CLOUD2_TIME
 }
 
+export const setGasGiant1CustomTime = (u: GasGiant1Uniforms, t: number): void => {
+    u.cloud.time.value = t * getMultiplier(CLOUD.size, CLOUD.timeSpeed)
+    u.cloud2.time.value = t * getMultiplier(CLOUD2.size, CLOUD2.timeSpeed)
+}
+
 export const createGasGiant1 = (rootSeed: number) => {
     const uniforms = createGasGiant1Uniforms(rootSeed)
     const gasGiant = new Group()
