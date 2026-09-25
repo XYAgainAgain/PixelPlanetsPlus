@@ -5,11 +5,12 @@ declare const expect: typeof expectFunction
 declare const it: typeof itFunction
 
 import {
+    alphaBounds,
     bodyFrameSize,
     canonicalFrameSize,
-    canvasPixelsToComposerBody,
-    composerBodyToCanvasPixels,
     createSpritesheetGrid,
+    fitCanvasToArt,
+    placeBody,
     nearestExportScale,
     nudgeNormalizedCenter,
 } from './layout'
@@ -59,13 +60,16 @@ describe('export layout', () => {
         expect(createSpritesheetGrid(7, 5, 4, 4, 0).frames).toHaveLength(7)
     })
 
-    it.each([[1920, 1080], [1080, 1920], [1, 10000], [10000, 1]])('round-trips body coordinates at %d×%d', (width, height) => {
-        const body = { center: [0.31, 0.72] as const, light: [0.2, -0.3] as const }
-        const roundTrip = canvasPixelsToComposerBody(composerBodyToCanvasPixels(body, 400, width, height), width, height)
-        expect(roundTrip.center[0]).toBeCloseTo(body.center[0], 12)
-        expect(roundTrip.center[1]).toBeCloseTo(body.center[1], 12)
-        expect(roundTrip.light?.[0]).toBeCloseTo(body.light[0], 12)
-        expect(roundTrip.light?.[1]).toBeCloseTo(body.light[1], 12)
+    it('measures the tight alpha box of a frame and reports an empty one as null', () => {
+        const pixels = new Uint8ClampedArray(6 * 5 * 4)
+        pixels[(1 * 6 + 2) * 4 + 3] = 1
+        pixels[(3 * 6 + 4) * 4 + 3] = 255
+        expect(alphaBounds(pixels, 6, 5)).toEqual({ x: 2, y: 1, width: 3, height: 3 })
+        expect(alphaBounds(new Uint8ClampedArray(16), 2, 2)).toBeNull()
+    })
+
+    it('falls back to the whole frame when no art box is known', () => {
+        expect(placeBody([0.5, 0.5], 64, 48, 10, 4, null)).toEqual({ left: 12, top: 4, size: 40, art: { x: 0, y: 0, width: 10, height: 10 } })
     })
 
     it('sizes the body in the file as its whole drawn extent × zoom', () => {
@@ -115,5 +119,39 @@ describe('export layout', () => {
         const nudged = nudgeNormalizedCenter(center, 800, 400, 1, -1)
         expect(nudged[0] * 800 - center[0] * 800).toBe(1)
         expect(nudged[1] * 400 - center[1] * 400).toBe(-1)
+    })
+
+    // Deep-Fold's disc fills texels 1…N−1 of its frame, the case that used to hug the right and bottom edges.
+    const discFrame = (cells: number, first: number): { width: number, height: number, pixels: Uint8ClampedArray } => {
+        const pixels = new Uint8ClampedArray(cells * cells * 4)
+        for (let y = first; y < cells; y += 1) for (let x = first; x < cells; x += 1) pixels[(y * cells + x) * 4 + 3] = 255
+        return { width: cells, height: cells, pixels }
+    }
+    const coverage = (recipe: SceneRecipeV2, frame: ReturnType<typeof discFrame>) => {
+        const { width, height } = recipe.canvas
+        const band = composeBand(recipe, frame, 0, height, 'mask', null)
+        let minX = width, minY = height, maxX = -1, maxY = -1
+        for (let y = 0; y < height; y += 1) for (let x = 0; x < width; x += 1) {
+            if (band[(y * width + x) * 4 + 3] === 0) continue
+            minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y)
+        }
+        return { left: minX, top: minY, right: width - 1 - maxX, bottom: height - 1 - maxY }
+    }
+
+    it.each([[1, 10], [2, 10], [4, 7], [8, 13], [1, 106]] as const)('fits the canvas to the art with zero margin at %d× zoom (%d cells)', (scale, cells) => {
+        const frame = discFrame(cells, 1)
+        const art = alphaBounds(frame.pixels, frame.width, frame.height)
+        const canvas = fitCanvasToArt(cells, scale, art)
+        expect(canvas).toEqual({ width: (cells - 1) * scale, height: (cells - 1) * scale })
+        const recipe = sceneRecipe({ canvas, export: { ...sceneRecipe().export, scale } })
+        expect(coverage(recipe, frame)).toEqual({ left: 0, top: 0, right: 0, bottom: 0 })
+    })
+
+    it('splits leftover evenly when centered, with an odd spare pixel on the right and bottom', () => {
+        const frame = discFrame(10, 1)
+        const even = coverage(sceneRecipe({ canvas: { width: 40, height: 42 } }), frame)
+        expect(even).toEqual({ left: 2, top: 3, right: 2, bottom: 3 })
+        const odd = coverage(sceneRecipe({ canvas: { width: 41, height: 43 } }), frame)
+        expect(odd).toEqual({ left: 2, top: 3, right: 3, bottom: 4 })
     })
 })

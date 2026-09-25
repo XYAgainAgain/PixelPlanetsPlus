@@ -10,6 +10,7 @@ import {
     upscaleFrame,
     zip,
 } from './animated'
+import { effectiveChromaticAberration } from './effects'
 import { exportFilename, exportStem, sequenceFrameFilename } from './filenames'
 
 export const exportPngSequence: ExportRunner = async (request, options): Promise<ExportRunOutput> => {
@@ -18,6 +19,7 @@ export const exportPngSequence: ExportRunner = async (request, options): Promise
     const phases = playbackPhases(request)
     const scale = request.recipe.export.scale
     const size = animatedFrameSize(request)
+    const chromaticOffset = effectiveChromaticAberration(request.recipe, size)
     const metadata = sequenceMetadata(request, size, size, phases)
     const { session, backdrop } = await createAnimatedSession(request, options)
     const entries: Record<string, Uint8Array> = {}
@@ -26,7 +28,7 @@ export const exportPngSequence: ExportRunner = async (request, options): Promise
         for (let index = 0; index < phases.length; index += 1) {
             throwIfAborted(options.signal)
             const frame = await session.renderFrame(phases[index]!, { requestId: request.id, signal: options.signal })
-            const png = await pngBlob(upscaleFrame(frame, scale, backdrop))
+            const png = await pngBlob(upscaleFrame(frame, scale, backdrop, chromaticOffset))
             entries[sequenceFrameFilename(request.recipe, index)] = new Uint8Array(await png.arrayBuffer())
             options.onProgress?.({ requestId: request.id, stage: 'encode', completed: index + 1, total: phases.length })
         }

@@ -17,17 +17,6 @@ export interface SpritesheetGrid {
     frames: readonly SpritesheetRect[]
 }
 
-export interface ComposerBody {
-    center: Vec2
-    light: Vec2 | null
-}
-
-export interface CanvasBody {
-    center: Vec2
-    size: number
-    light: Vec2 | null
-}
-
 export const EXPORT_SCALES: readonly ExportScale[] = [1, 2, 4, 8]
 
 export const bodyLocalToLightUv = (local: readonly [number, number]): [number, number] =>
@@ -97,45 +86,67 @@ export function createSpritesheetGrid(
     return { columns, rows, width, height, frames }
 }
 
-export function normalizedCenterToCanvasPixels(center: Vec2, canvasWidth: number, canvasHeight: number): Vec2 {
+// A rectangle in the body's canonical frame texels.
+export interface ArtBox {
+    x: number
+    y: number
+    width: number
+    height: number
+}
+
+// Where the zoomed canonical frame lands on the canvas, in whole canvas pixels.
+export interface BodyPlacement {
+    left: number
+    top: number
+    size: number
+    art: ArtBox
+}
+
+/* The tight box around every texel with any alpha. Deep-Fold's quantize samples each texel at its corner,
+   so a disc fills texels 1…N−1 of its frame: the art sits half a texel right and down of the frame's center. */
+export function alphaBounds(pixels: ArrayLike<number>, width: number, height: number): ArtBox | null {
+    let minX = width
+    let minY = height
+    let maxX = -1
+    let maxY = -1
+    for (let y = 0; y < height; y += 1) {
+        for (let x = 0; x < width; x += 1) {
+            if (pixels[(y * width + x) * 4 + 3] === 0) continue
+            if (x < minX) minX = x
+            if (x > maxX) maxX = x
+            if (y < minY) minY = y
+            if (y > maxY) maxY = y
+        }
+    }
+    return maxX < 0 ? null : { x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1 }
+}
+
+// Rounds half-integers down, so an odd leftover always puts its spare pixel on the right or bottom margin.
+const roundHalfDown = (value: number): number => Math.ceil(value - 0.5 - 1e-9)
+
+/* The normalized center places the visible art's center, not the frame's, so 0.5 splits leftover evenly
+   (spare pixel right/bottom) and a canvas sized to the art box fits it with no margin at all. */
+export function placeBody(
+    center: Vec2,
+    canvasWidth: number,
+    canvasHeight: number,
+    frameCells: number,
+    scale: number,
+    art: ArtBox | null,
+): BodyPlacement {
     assertCanvasDimensions(canvasWidth, canvasHeight)
-    return [center[0] * canvasWidth, center[1] * canvasHeight]
+    assertPositiveInteger('frameCells', frameCells)
+    assertPositiveInteger('scale', scale)
+    const box = art ?? { x: 0, y: 0, width: frameCells, height: frameCells }
+    const artLeft = roundHalfDown(center[0] * canvasWidth - box.width * scale / 2)
+    const artTop = roundHalfDown(center[1] * canvasHeight - box.height * scale / 2)
+    return { left: artLeft - box.x * scale, top: artTop - box.y * scale, size: frameCells * scale, art: box }
 }
 
-export function canvasPixelsToNormalizedCenter(center: Vec2, canvasWidth: number, canvasHeight: number): Vec2 {
-    assertCanvasDimensions(canvasWidth, canvasHeight)
-    return [center[0] / canvasWidth, center[1] / canvasHeight]
-}
-
-export function bodyLocalLightToCanvasPixels(light: Vec2, center: Vec2, bodySize: number): Vec2 {
-    assertFinite('bodySize', bodySize)
-    return [center[0] + light[0] * bodySize, center[1] + light[1] * bodySize]
-}
-
-export function canvasPixelsToBodyLocalLight(light: Vec2, center: Vec2, bodySize: number): Vec2 {
-    assertFinite('bodySize', bodySize)
-    if (bodySize === 0) {
-        throw new RangeError('bodySize must not be zero')
-    }
-    return [(light[0] - center[0]) / bodySize, (light[1] - center[1]) / bodySize]
-}
-
-// frameSize is the body's frame in the same pixel space as the canvas dimensions.
-export function composerBodyToCanvasPixels(body: ComposerBody, frameSize: number, canvasWidth: number, canvasHeight: number): CanvasBody {
-    assertFinite('frameSize', frameSize)
-    const center = normalizedCenterToCanvasPixels(body.center, canvasWidth, canvasHeight)
-    return {
-        center,
-        size: frameSize,
-        light: body.light === null ? null : bodyLocalLightToCanvasPixels(body.light, center, frameSize),
-    }
-}
-
-export function canvasPixelsToComposerBody(body: CanvasBody, canvasWidth: number, canvasHeight: number): ComposerBody {
-    return {
-        center: canvasPixelsToNormalizedCenter(body.center, canvasWidth, canvasHeight),
-        light: body.light === null ? null : canvasPixelsToBodyLocalLight(body.light, body.center, body.size),
-    }
+// The canvas that holds the art exactly, for "Fit canvas to planet".
+export function fitCanvasToArt(frameCells: number, scale: number, art: ArtBox | null): { width: number, height: number } {
+    const box = art ?? { x: 0, y: 0, width: frameCells, height: frameCells }
+    return { width: box.width * scale, height: box.height * scale }
 }
 
 export function nudgeNormalizedCenter(center: Vec2, canvasWidth: number, canvasHeight: number, deltaX: number, deltaY: number): Vec2 {

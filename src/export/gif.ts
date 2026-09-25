@@ -1,5 +1,6 @@
 import type { ExportRunOutput, ExportRunner } from './contract'
 import { animatedFrameSize, canvasPixels, createAnimatedSession, playbackPhases, throwIfAborted, upscaleFrame, type AnimatedExportRunOptions } from './animated'
+import { effectiveChromaticAberration } from './effects'
 import { exportFilename } from './filenames'
 import { distributeGifDelays } from './timing'
 
@@ -43,6 +44,7 @@ export const exportGif: ExportRunner = async (request, options): Promise<ExportR
     const delays = distributeGifDelays(request.recipe.export.framesPerSecond, phases.length)
     const scale = request.recipe.export.scale
     const size = animatedFrameSize(request)
+    const chromaticOffset = effectiveChromaticAberration(request.recipe, size)
     const { session, backdrop } = await createAnimatedSession(request, options)
     let worker: Worker | null = null
 
@@ -56,7 +58,7 @@ export const exportGif: ExportRunner = async (request, options): Promise<ExportR
         for (let index = 0; index < phases.length; index += 1) {
             throwIfAborted(options.signal)
             const frame = await session.renderFrame(phases[index]!, { requestId: request.id, signal: options.signal })
-            const rgba = canvasPixels(upscaleFrame(frame, scale, backdrop))
+            const rgba = canvasPixels(upscaleFrame(frame, scale, backdrop, chromaticOffset))
             await workerMessage(worker, { type: 'gif-sample', rgba }, [rgba.buffer])
             options.onProgress?.({ requestId: request.id, stage: 'palette', completed: index + 1, total: phases.length })
         }
@@ -65,7 +67,7 @@ export const exportGif: ExportRunner = async (request, options): Promise<ExportR
         for (let index = 0; index < phases.length; index += 1) {
             throwIfAborted(options.signal)
             const frame = await session.renderFrame(phases[index]!, { requestId: request.id, signal: options.signal })
-            const rgba = canvasPixels(upscaleFrame(frame, scale, backdrop))
+            const rgba = canvasPixels(upscaleFrame(frame, scale, backdrop, chromaticOffset))
             await workerMessage(worker, { type: 'gif-frame', rgba, delay: delays[index]! }, [rgba.buffer])
             options.onProgress?.({ requestId: request.id, stage: 'encode', completed: index + 1, total: phases.length })
         }

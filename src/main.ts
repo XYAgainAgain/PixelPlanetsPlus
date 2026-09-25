@@ -8,6 +8,7 @@ import type { SceneComposer } from './export/composer'
 import { bodyLocalToLightUv, lightUvToBodyLocal } from './export/layout'
 import type { BackdropV2, SceneRecipeV2 } from './export/types'
 import { decodeWorldParams, encodeWorldParams } from './export/worldParams'
+import { canonicalChromaticAberration } from './export/effects'
 import { LAND_PHASE_PER_QUAD } from './tsl/planets/islands'
 import { PLANET_FACTORIES, createPlanet, type PlanetRuntime } from './tsl/registry'
 import { PLANETS, type PlanetTypeId } from './tsl/values'
@@ -811,7 +812,8 @@ async function init(): Promise<void> {
             pixels: planet.pixels.value,
             palette: [planet.palette.colors().map((color) => color.toHex())],
             layers: planet.metadata.layers.map((layer, index) => ({ id: layer.node, visible: planet.group.children[index]?.visible ?? true })),
-            dither: ditherInput.checked,
+            // The composer's Dither box defaults to the live toggle but may differ for the export alone.
+            dither: composing ? source?.dither ?? ditherInput.checked : ditherInput.checked,
             backdrop: composing ? source?.backdrop ?? liveBackdropRecipe(background.mode, backgroundSeed, 0)
                 : loadedScene?.backdrop ?? liveBackdropRecipe(background.mode, backgroundSeed, 0),
             export: composing ? source?.export ?? loadedScene?.export ?? {
@@ -841,7 +843,9 @@ async function init(): Promise<void> {
             || !samePair(recipe.body.light, defaultLight) || customBackdrop
             || recipe.export.scale !== 1 || recipe.export.frameCount !== 60 || recipe.export.columns !== 8
             || recipe.export.margin !== 0 || recipe.export.startPhase !== 0 || recipe.export.endPhase !== 1
-            || recipe.export.direction !== 'forward' || recipe.export.framesPerSecond !== 12 || recipe.effects.length !== 0
+            || recipe.export.direction !== 'forward' || recipe.export.framesPerSecond !== 12
+            // Chromatic aberration left on is the page default the composer restores, so only other effects count.
+            || recipe.effects.some((effect) => effect !== canonicalChromaticAberration(recipe.effects) || !effect.enabled)
     }
     const scheduleSceneUrl = (): void => {
         window.clearTimeout(sceneWriteTimer)
@@ -878,6 +882,7 @@ async function init(): Promise<void> {
                 stage,
                 gpu,
                 currentRecipe: makeCurrentRecipe,
+                liveChromaticAberration: () => caToggle.checked,
                 setPixels: (pixels) => {
                     pixelsNumber.value = String(pixels)
                     syncPixels(pixelsNumber)

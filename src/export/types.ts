@@ -103,6 +103,11 @@ export interface PhaseRangeV2 {
     step: number
 }
 
+// Present only when a post effect changed the written pixels; red shifts left and blue right by offsetPixels.
+export interface PostEffectsSummary {
+    chromaticAberration: { offsetPixels: number }
+}
+
 export interface SpritesheetMetadataV2 {
     schema: 'pixelplanetsplus-spritesheet@2'
     celestialType: PlanetTypeId
@@ -116,6 +121,7 @@ export interface SpritesheetMetadataV2 {
     scale: ExportScale
     transparent: boolean
     backdrop: BackdropSummaryV2
+    postEffects?: PostEffectsSummary
 }
 
 export interface SequenceMetadataV2 {
@@ -130,4 +136,5 @@ export interface SequenceMetadataV2 {
     scale: ExportScale
     transparent: boolean
     backdrop: BackdropSummaryV2
+    postEffects?: PostEffectsSummary
 }

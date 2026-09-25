@@ -1,6 +1,6 @@
 import type { ExportRunOptions, ExportRunner } from './contract'
 import { preflightRenderRequest, type PreflightLimits } from './preflight'
-import { composeBand, encodePngBands, throwIfAborted } from './raster'
+import { composeBand, encodePngBands, placeRenderedBody, throwIfAborted } from './raster'
 import { createExportSession } from './runtime'
 import { createBackdropRasterizer } from './backdrop'
 import { exportFilename } from './filenames'
@@ -41,13 +41,14 @@ export const exportCompositePng = async (
         })
         throwIfAborted(options.signal)
         const backdrop = await createBackdropRasterizer(request.recipe.backdrop, request.recipe.canvas.width, request.recipe.canvas.height)
+        const placement = placeRenderedBody(request.recipe, body)
         const data = await encodePngBands({
             requestId: request.id,
             width: request.recipe.canvas.width,
             height: request.recipe.canvas.height,
             signal: options.signal,
             onProgress: options.onProgress,
-            band: (startY, rowCount) => composeBand(request.recipe, body, startY, rowCount, 'composite', backdrop),
+            band: (startY, rowCount) => composeBand(request.recipe, body, startY, rowCount, 'composite', backdrop, placement),
         })
         return {
             files: [{ filename: exportFilename(request.recipe, 'png'), mediaType: 'image/png', data }],

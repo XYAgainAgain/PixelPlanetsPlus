@@ -1,4 +1,5 @@
-import { composerBodyToCanvasPixels } from './layout'
+import { alphaBounds, placeBody, type BodyPlacement } from './layout'
+import { applyChromaticAberration, effectiveChromaticAberration } from './effects'
 import type { ExportFrame } from './runtime'
 import type { RenderProgress, SceneRecipeV2 } from './types'
 import type { BackdropRasterizer } from './backdrop'
@@ -34,6 +35,12 @@ export const blendOver = (
     target[targetOffset + 3] = Math.round(alpha * 255)
 }
 
+// Placed by the full body's art box, so isolated layer passes stay registered to the composite.
+export const placeRenderedBody = (recipe: SceneRecipeV2, body: ExportFrame): BodyPlacement => placeBody(
+    recipe.body.center, recipe.canvas.width, recipe.canvas.height, body.width, recipe.export.scale,
+    alphaBounds(body.pixels, body.width, body.height),
+)
+
 export const composeBand = (
     recipe: SceneRecipeV2,
     body: ExportFrame | null,
@@ -41,18 +48,16 @@ export const composeBand = (
     rowCount: number,
     mode: 'composite' | 'body' | 'background' | 'mask',
     backdropRasterizer: BackdropRasterizer | null,
+    placement: BodyPlacement | null = body && placeRenderedBody(recipe, body),
 ): Uint8ClampedArray => {
-    const { width, height } = recipe.canvas
+    const { width } = recipe.canvas
     const output = mode === 'body' || mode === 'mask'
         ? new Uint8ClampedArray(width * rowCount * 4)
         : backdropRasterizer?.renderBand(startY, rowCount)
             ?? new Uint8ClampedArray(width * rowCount * 4)
-    if (mode === 'background' || !body) return output
+    if (mode === 'background' || !body || !placement) return output
     // Whole-number zoom of the canonical frame: every body texel becomes an exact scale × scale block.
-    const size = body.width * recipe.export.scale
-    const placement = composerBodyToCanvasPixels(recipe.body, size, width, height)
-    const left = Math.round(placement.center[0] - size / 2)
-    const top = Math.round(placement.center[1] - size / 2)
+    const { left, top, size } = placement
     for (let localY = 0; localY < rowCount; localY += 1) {
         const canvasY = startY + localY
         const sourceY = Math.floor((canvasY - top) * body.height / size)
@@ -72,6 +77,8 @@ export const composeBand = (
             blendOver(output, targetOffset, body.pixels, sourceOffset)
         }
     }
+    // Only the flattened composite carries the effect; passes stay clean for recombination and masks.
+    if (mode === 'composite') applyChromaticAberration(output, width, rowCount, effectiveChromaticAberration(recipe, width))
     return output
 }
 

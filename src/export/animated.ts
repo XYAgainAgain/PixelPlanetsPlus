@@ -5,8 +5,9 @@ import { createExportSession, type ExportFrame } from './runtime'
 import { generatePhaseSamples } from './timing'
 import { createBackdropRasterizer } from './backdrop'
 import type { ExportRunOptions } from './contract'
+import { applyChromaticAberration, effectiveChromaticAberration } from './effects'
 import { SEQUENCE_FRAME_DIGITS, sequenceFramePrefix } from './filenames'
-import type { BackdropSummaryV2, PhaseRangeV2, RenderRequest, SequenceMetadataV2, SpritesheetMetadataV2 } from './types'
+import type { BackdropSummaryV2, PhaseRangeV2, PostEffectsSummary, RenderRequest, SequenceMetadataV2, SpritesheetMetadataV2 } from './types'
 
 const DEFAULT_WORKING_LIMIT = 512 * 1024 * 1024
 const DEFAULT_BLOB_LIMIT = 512 * 1024 * 1024
@@ -97,10 +98,12 @@ const frozenBackdrop = async (request: RenderRequest, width: number, height: num
     return canvas
 }
 
+// chromaticOffset post-processes the flattened frame (backdrop included), exactly like the PNG composite.
 export const upscaleFrame = (
     frame: ExportFrame,
     scale: number,
     backdrop: Canvas | null,
+    chromaticOffset = 0,
 ): Canvas => {
     const output = createCanvas(frame.width * scale, frame.height * scale)
     const outputContext = context(output)
@@ -108,6 +111,11 @@ export const upscaleFrame = (
     const source = createCanvas(frame.width, frame.height)
     context(source).putImageData(new ImageData(new Uint8ClampedArray(frame.pixels), frame.width, frame.height), 0, 0)
     outputContext.drawImage(source, 0, 0, output.width, output.height)
+    if (chromaticOffset > 0) {
+        const image = outputContext.getImageData(0, 0, output.width, output.height)
+        applyChromaticAberration(image.data, output.width, output.height, chromaticOffset)
+        outputContext.putImageData(image, 0, 0)
+    }
     return output
 }
 
@@ -133,6 +141,11 @@ export const createAnimatedSession = async (request: RenderRequest, options: Ani
 
 const isTransparent = (request: RenderRequest): boolean =>
     request.recipe.backdrop.base.kind === 'transparent'
+
+const postEffects = (request: RenderRequest, width: number): { postEffects?: PostEffectsSummary } => {
+    const offsetPixels = effectiveChromaticAberration(request.recipe, width)
+    return offsetPixels > 0 ? { postEffects: { chromaticAberration: { offsetPixels } } } : {}
+}
 
 const backdropSummary = (request: RenderRequest): BackdropSummaryV2 =>
     ({ base: request.recipe.backdrop.base.kind, stars: request.recipe.backdrop.stars !== null })
@@ -168,6 +181,7 @@ export const spritesheetMetadata = (
         scale: settings.scale,
         transparent: isTransparent(request),
         backdrop: backdropSummary(request),
+        ...postEffects(request, width),
     }
 }
 
@@ -189,6 +203,7 @@ export const sequenceMetadata = (
     scale: request.recipe.export.scale,
     transparent: isTransparent(request),
     backdrop: backdropSummary(request),
+    ...postEffects(request, width),
 })
 
 export const zip = (entries: Record<string, Uint8Array>, signal?: AbortSignal): Promise<Blob> => new Promise((resolve, reject) => {

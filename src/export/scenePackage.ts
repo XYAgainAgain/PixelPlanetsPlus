@@ -2,7 +2,9 @@ import { strToU8, Zip, ZipPassThrough } from 'fflate'
 import { SCENE_PACKAGE_BASE_PASSES, type ExportRunner } from './contract'
 import { exportFilename } from './filenames'
 import { assertPngAdmission } from './png'
-import { composeBand, encodePngBands, throwIfAborted } from './raster'
+import { composeBand, encodePngBands, placeRenderedBody, throwIfAborted } from './raster'
+import type { BodyPlacement } from './layout'
+import { effectiveChromaticAberration } from './effects'
 import { createExportSession, type ExportFrame } from './runtime'
 import { createBackdropRasterizer, type BackdropRasterizer } from './backdrop'
 
@@ -72,6 +74,7 @@ const encodePass = async (
     mode: 'composite' | 'body' | 'background' | 'mask',
     options: Parameters<ExportRunner>[1],
     backdrop: BackdropRasterizer | null,
+    placement: BodyPlacement | null,
 ): Promise<Blob> => {
     return encodePngBands({
         requestId: request.id,
@@ -79,7 +82,7 @@ const encodePass = async (
         height: request.recipe.canvas.height,
         signal: options.signal,
         onProgress: options.onProgress,
-        band: (startY, rowCount) => composeBand(request.recipe, frame, startY, rowCount, mode, backdrop),
+        band: (startY, rowCount) => composeBand(request.recipe, frame, startY, rowCount, mode, backdrop, placement),
     })
 }
 
@@ -99,21 +102,27 @@ export const exportScenePackage: ExportRunner = async (request, options) => {
             request.recipe.canvas.width,
             request.recipe.canvas.height,
         )
+        const placement = placeRenderedBody(request.recipe, body)
         const entries: PackageEntry[] = []
         for (const pass of SCENE_PACKAGE_BASE_PASSES) {
             const usesBackdrop = pass.mode === 'composite' || pass.mode === 'background'
             entries.push({
                 name: pass.name,
-                data: await encodePass(request, pass.mode === 'background' ? null : body, pass.mode, options, usesBackdrop ? backdrop : null),
+                data: await encodePass(request, pass.mode === 'background' ? null : body, pass.mode, options, usesBackdrop ? backdrop : null, placement),
             })
         }
-        entries.push({ name: 'scene.json', data: strToU8(JSON.stringify(request.recipe, null, 2)) })
+        // Recombining the passes reproduces the composite only before its post effects, so say which ran.
+        const chromaticAberration = effectiveChromaticAberration(request.recipe, request.recipe.canvas.width)
+        const scene = chromaticAberration > 0
+            ? { ...request.recipe, postEffects: { chromaticAberration: { offsetPixels: chromaticAberration, appliedTo: ['composite.png'] } } }
+            : request.recipe
+        entries.push({ name: 'scene.json', data: strToU8(JSON.stringify(scene, null, 2)) })
         if (request.includeLayers) {
             for (const layerId of session.visibleLayerIds()) {
                 throwIfAborted(options.signal)
                 session.setIsolatedLayer(layerId)
                 const layer = await session.renderFrame(request.recipe.body.phase, frameOptions)
-                entries.push({ name: `layers/${safeName(layerId)}.png`, data: await encodePass(request, layer, 'body', options, null) })
+                entries.push({ name: `layers/${safeName(layerId)}.png`, data: await encodePass(request, layer, 'body', options, null, placement) })
             }
             session.setIsolatedLayer(null)
         }

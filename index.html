@@ -20,13 +20,13 @@
             </div>
             <p id="stage-placeholder" class="text-sm text-zinc-500 select-none">a tiny world will spin here soon</p>
             <p id="fps" class="pointer-events-none absolute bottom-2 left-2 font-mono text-xs text-zinc-500 select-none">FPS: 0</p>
-            <section id="export-workspace" class="export-workspace" hidden aria-labelledby="export-title">
+            <section id="export-workspace" class="export-workspace grid grid-rows-[minmax(0,1fr)_auto]" hidden aria-labelledby="export-title">
                 <div id="export-preview-stage" class="export-preview-stage">
                     <canvas id="export-preview" class="export-preview" tabindex="0" aria-label="Export preview. Drag the planet or light to position them."></canvas>
                     <button id="export-body-handle" class="export-drag-handle export-body-handle" type="button" aria-label="Move planet"></button>
                     <button id="export-light-handle" class="export-drag-handle export-light-handle" type="button" aria-label="Move light"></button>
-                    <p id="export-preview-help" class="export-preview-help">Drag the planet or its light · Arrow keys nudge (Shift for 10) · Alt skips center snapping</p>
                 </div>
+                <p id="export-preview-help" class="border-t border-zinc-800 bg-zinc-950 px-3 py-1.5 text-center text-[0.6875rem] text-zinc-300">Drag the planet or its light · Arrow keys nudge (Shift for 10) · Alt skips center snapping</p>
                 <form id="export-form" class="export-controls" hidden>
                     <header class="flex items-center justify-between gap-3 border-b border-zinc-700 pb-3">
                         <div>
@@ -45,6 +45,13 @@
                         <output id="export-size-readout" class="rounded border border-zinc-700 bg-zinc-800/60 px-2 py-1.5 font-mono text-sm text-zinc-100" aria-live="polite">Planet in file: 100×100 px</output>
                         <p id="export-size-detail" class="text-xs text-zinc-400">100 px planet × 1 zoom, pixel-sharp</p>
                         <p id="export-size-warning" class="export-warning" hidden>The planet is bigger than the canvas, so parts of it will be cropped.</p>
+                    </fieldset>
+
+                    <fieldset class="flex flex-col gap-2">
+                        <legend class="mb-1 text-xs font-medium text-zinc-300">Look</legend>
+                        <label class="flex items-center justify-between gap-3 text-xs text-zinc-300"><span>Dither</span><input id="export-dither" type="checkbox" class="toggle" checked></label>
+                        <label class="flex items-center justify-between gap-3 text-xs text-zinc-300"><span>Chromatic Aberration</span><input id="export-chromatic-aberration" type="checkbox" class="toggle" checked aria-describedby="export-chromatic-aberration-note"></label>
+                        <p id="export-chromatic-aberration-note" class="text-xs text-zinc-400" hidden>Off: the image is under 500 px wide, too small for a whole-pixel color split.</p>
                     </fieldset>
 
                     <div id="export-static-controls" class="flex flex-col gap-4">

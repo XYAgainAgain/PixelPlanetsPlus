@@ -3,6 +3,7 @@ import { deflateSync, inflateSync } from 'fflate'
 import { canonicalFrameSize, nearestExportScale } from './layout'
 import type { BackdropBaseV2, BackdropStarsV2, BackdropV2, ExportEffectV1, ExportScale, PlaybackDirection, SceneRecipeV2, Vec2 } from './types'
 import { defaultPaletteFor } from './worldParams'
+import { CHROMATIC_ABERRATION_ID, CHROMATIC_ABERRATION_VERSION, canonicalChromaticAberration, isChromaticAberration } from './effects'
 
 export const SCENE_SCHEMA = 'pixelplanetsplus-scene@2' as const
 const LEGACY_SCENE_SCHEMA = 'pixelplanetsplus-scene@1'
@@ -233,6 +234,9 @@ const GROUP_LAYERS = 1 << 1
 const GROUP_BACKDROP = 1 << 2
 const GROUP_EXPORT = 1 << 3
 const GROUP_EFFECTS = 1 << 4
+// Flag-byte bits after dither (1) and light (2).
+const FLAG_ABERRATION = 1 << 2
+const FLAG_ABERRATION_ON = 1 << 3
 const FIXED_SCALE = 10_000
 const PLANET_IDS = Object.keys(PLANETS) as PlanetTypeId[]
 const DIRECTIONS = ['forward', 'reverse', 'ping-pong'] as const
@@ -464,13 +468,17 @@ const packRecipe = (recipe: SceneRecipeV2): Uint8Array => {
     const writer = new Writer()
     const defaults = defaultLayers(recipe.celestialType)
     const paletteDefaults = defaultPaletteFor(recipe.celestialType)
+    // chromaticAberration@1 without parameters rides in two flag bits, so the common scene link stays short.
+    const aberration = canonicalChromaticAberration(recipe.effects)
+    const effects = recipe.effects.filter((effect) => effect !== aberration)
     const groups = (!samePalette(recipe.palette, paletteDefaults) ? GROUP_PALETTE : 0)
         | (!sameLayers(recipe.layers, defaults) ? GROUP_LAYERS : 0)
         | (recipe.backdrop.base.kind !== 'transparent' || recipe.backdrop.stars ? GROUP_BACKDROP : 0)
         | (!sameExport(recipe.export) ? GROUP_EXPORT : 0)
-        | (recipe.effects.length > 0 ? GROUP_EFFECTS : 0)
+        | (effects.length > 0 ? GROUP_EFFECTS : 0)
     writer.byte(groups)
-    writer.byte((recipe.dither ? 1 : 0) | (recipe.body.light ? 2 : 0))
+    writer.byte((recipe.dither ? 1 : 0) | (recipe.body.light ? 2 : 0)
+        | (aberration ? FLAG_ABERRATION : 0) | (aberration?.enabled ? FLAG_ABERRATION_ON : 0))
     writer.byte(PLANET_IDS.indexOf(recipe.celestialType))
     writer.varint(recipe.canvas.width)
     writer.varint(recipe.canvas.height)
@@ -523,7 +531,7 @@ const packRecipe = (recipe: SceneRecipeV2): Uint8Array => {
         writer.byte(DIRECTIONS.indexOf(recipe.export.direction))
         writer.fixed(recipe.export.framesPerSecond)
     }
-    if (groups & GROUP_EFFECTS) writeEffects(writer, recipe.effects)
+    if (groups & GROUP_EFFECTS) writeEffects(writer, effects)
     return writer.finish()
 }
 
@@ -534,7 +542,8 @@ const unpackRecipe = (bytes: Uint8Array, version: number): SceneRecipeV2 => {
     const groups = reader.byte()
     if (groups & ~0x1f) throw new SceneRecipeError('unknown optional group')
     const flags = reader.byte()
-    if (flags & ~3) throw new SceneRecipeError('unknown boolean flag')
+    if (flags & ~(3 | FLAG_ABERRATION | FLAG_ABERRATION_ON)) throw new SceneRecipeError('unknown boolean flag')
+    if ((flags & FLAG_ABERRATION_ON) && !(flags & FLAG_ABERRATION)) throw new SceneRecipeError('non-canonical effect flags')
     const celestialType = PLANET_IDS[reader.byte()]
     if (!celestialType) throw new SceneRecipeError('unknown celestial type')
     const canvas = { width: reader.varint(), height: reader.varint() }
@@ -577,6 +586,10 @@ const unpackRecipe = (bytes: Uint8Array, version: number): SceneRecipeV2 => {
         }
     }
     const effects = groups & GROUP_EFFECTS ? readEffects(reader) : []
+    if (flags & FLAG_ABERRATION) {
+        if (effects.some(isChromaticAberration)) throw new SceneRecipeError('duplicate chromatic aberration effect')
+        effects.push({ id: CHROMATIC_ABERRATION_ID, version: CHROMATIC_ABERRATION_VERSION, enabled: (flags & FLAG_ABERRATION_ON) !== 0, parameters: {} })
+    }
     if (!reader.done()) throw new SceneRecipeError('trailing binary data')
     return validateSceneRecipe({
         schema: legacy ? LEGACY_SCENE_SCHEMA : SCENE_SCHEMA, celestialType, canvas,

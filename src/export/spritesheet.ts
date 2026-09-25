@@ -11,6 +11,7 @@ import {
     upscaleFrame,
     zip,
 } from './animated'
+import { effectiveChromaticAberration } from './effects'
 import { exportFilename, exportStem } from './filenames'
 import { createSpritesheetGrid } from './layout'
 
@@ -19,6 +20,7 @@ export const exportSpritesheet: ExportRunner = async (request, options): Promise
     // Layout and metadata can reject the request, so they run before the session exists.
     const scale = request.recipe.export.scale
     const size = animatedFrameSize(request)
+    const chromaticOffset = effectiveChromaticAberration(request.recipe, size)
     const metadata = spritesheetMetadata(request, size, size)
     const phases = uniquePhases(request)
     const grid = createSpritesheetGrid(phases.length, request.recipe.export.columns, size, size, request.recipe.export.margin)
@@ -31,7 +33,7 @@ export const exportSpritesheet: ExportRunner = async (request, options): Promise
         for (let index = 0; index < grid.frames.length; index += 1) {
             throwIfAborted(options.signal)
             const frame = await session.renderFrame(phases[index]!, { requestId: request.id, signal: options.signal })
-            const image = upscaleFrame(frame, scale, backdrop)
+            const image = upscaleFrame(frame, scale, backdrop, chromaticOffset)
             const rect = grid.frames[index]!
             context.drawImage(image, rect.x, rect.y)
             options.onProgress?.({ requestId: request.id, stage: 'encode', completed: index + 1, total: grid.frames.length })

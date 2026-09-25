@@ -1,13 +1,25 @@
 import { exportGif } from './gif'
 import { createBackdropRasterizer } from './backdrop'
 import {
+    alphaBounds,
     bodyFrameSize,
     canonicalFrameSize,
-    canvasPixelsToComposerBody,
-    composerBodyToCanvasPixels,
+    fitCanvasToArt,
     nudgeNormalizedCenter,
-    type CanvasBody,
+    placeBody,
+    type ArtBox,
 } from './layout'
+import {
+    CHROMATIC_ABERRATION_MIN_WIDTH,
+    applyChromaticAberration,
+    chromaticAberrationOffset,
+    chromaticAberrationSetting,
+    effectiveChromaticAberration,
+    hasNoncanonicalChromaticAberration,
+    isChromaticAberration,
+    withChromaticAberration,
+} from './effects'
+import { PLANETS } from '../tsl/values'
 import { exportCompositePng } from './png'
 import { preflightRenderRequest, type PreflightLimits } from './preflight'
 import { MAX_FRAMES_PER_SECOND, validateSceneRecipe } from './recipe'
@@ -26,10 +38,23 @@ import type { BackdropBaseV2, BackdropV2, ExportFormat, ExportScale, PlaybackDir
 type ComposerFormat = 'png' | 'gif' | 'spritesheet'
 type DragKind = 'body' | 'light'
 
+// The body as drawn on the preview canvas, in preview pixels.
+interface PreviewGeometry {
+    left: number
+    top: number
+    sizeX: number
+    sizeY: number
+    scaleX: number
+    artCenter: Vec2
+    light: Vec2 | null
+}
+
 export interface ComposerOptions {
     stage: HTMLElement
     gpu: GpuHost
     currentRecipe: () => SceneRecipeV2
+    // The live Chromatic Aberration toggle, which seeds the export checkbox when the recipe has no say.
+    liveChromaticAberration: () => boolean
     // Writes the planet's pixel count through to the live control and returns the value it accepted.
     setPixels: (pixels: number) => number
     onRecipeChange: (recipe: SceneRecipeV2) => void
@@ -57,6 +82,8 @@ const integerValue = (id: string, minimum: number): number => Math.max(minimum, 
 const setHidden = (element: HTMLElement, hidden: boolean): void => { element.hidden = hidden }
 const LIGHT_LIMIT = 0.85
 const SNAP_DISTANCE = 6
+// Normalized centers travel at four decimals, so "exactly centered" means within that precision.
+const isCentered = (value: number): boolean => Math.abs(value - 0.5) < 5e-5
 // Animated previews rasterize the frozen backdrop at the exported frame size up to this edge, like the exporter.
 const FROZEN_BACKDROP_PREVIEW_LIMIT = 2048
 const TRANSPARENT: BackdropV2 = { base: { kind: 'transparent' }, stars: null }
@@ -120,6 +147,11 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
     let previewBody: HTMLCanvasElement | null = null
     let previewBackdropCanvas: HTMLCanvasElement | null = null
     let previewBackdropKey = ''
+    // The art box measured from the latest preview render, keyed by the pose it was measured at.
+    let previewArt: { key: string, cells: number, box: ArtBox | null } | null = null
+    let fitPending = false
+    let relightQueued = false
+    let relightWanted = false
     let changedSinceOpen = false
     let controller: AbortController | null = null
     let requestCounter = 0
@@ -129,10 +161,14 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
         pointerId: number
         target: HTMLElement
         startClient: Vec2
-        startBody: CanvasBody
+        startGeometry: PreviewGeometry
         startRecipe: SceneRecipeV2
         moved: boolean
     } | null = null
+    const chromaticInput = $<HTMLInputElement>('export-chromatic-aberration')
+    const ditherInput = $<HTMLInputElement>('export-dither')
+    const chromaticNote = $('export-chromatic-aberration-note')
+    const smallImageNote = chromaticNote.textContent ?? ''
 
     // Preview and export share one alert, so a preview refresh must not clear an export failure.
     const showError = (message: string, source: 'preview' | 'export'): void => {
@@ -167,6 +203,9 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
         const framesPerSecond = Math.min(MAX_FRAMES_PER_SECOND, integerValue('export-fps', 1))
         return validateSceneRecipe({
             ...state,
+            // A disabled box shows "off" without erasing the choice, so it defers to the recipe.
+            dither: ditherInput.disabled ? state.dither : ditherInput.checked,
+            effects: chromaticInput.disabled ? state.effects : withChromaticAberration(state.effects, chromaticInput.checked),
             pixels: Math.max(12, Math.min(2048, integerValue('export-pixels', 12))),
             canvas: { width: integerValue('export-width', 1), height: integerValue('export-height', 1) },
             body: {
@@ -216,6 +255,31 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
         $<HTMLInputElement>('export-body-y').value = trimmed(recipe.body.center[1])
     }
 
+    // A recipe that never chose chromatic aberration follows the live toggle, as the export checkbox's default.
+    const seedLook = (recipe: SceneRecipeV2): SceneRecipeV2 => recipe.effects.some(isChromaticAberration)
+        ? recipe
+        : { ...recipe, effects: withChromaticAberration(recipe.effects, options.liveChromaticAberration()) }
+
+    // The width that governs the aberration: the canvas for PNG, the square frame for animated formats.
+    const outputWidth = (recipe: SceneRecipeV2): number => format === 'png'
+        ? recipe.canvas.width
+        : bodyFrameSize(recipe.celestialType, recipe.pixels, recipe.export.scale)
+
+    const syncLookControls = (recipe: SceneRecipeV2): void => {
+        ditherInput.disabled = PLANETS[recipe.celestialType].ditherLayers.length === 0
+        ditherInput.checked = recipe.dither
+        // A noncanonical entry is someone else's data: the box stays off and hands-off rather than rewrite it.
+        const foreign = hasNoncanonicalChromaticAberration(recipe.effects)
+        const available = !foreign && chromaticAberrationOffset(outputWidth(recipe)) >= 1
+        chromaticInput.disabled = !available
+        chromaticInput.checked = available && chromaticAberrationSetting(recipe.effects) === true
+        chromaticInput.title = available ? '' : foreign
+            ? 'This link carries a chromatic aberration setting this version cannot apply, so it is kept as is.'
+            : `Needs an image at least ${CHROMATIC_ABERRATION_MIN_WIDTH} px wide.`
+        chromaticNote.textContent = foreign ? chromaticInput.title : smallImageNote
+        setHidden(chromaticNote, available)
+    }
+
     const syncControls = (): void => {
         pixelsInput.value = String(state.pixels)
         $<HTMLInputElement>('export-width').value = String(state.canvas.width)
@@ -246,6 +310,7 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
         }
         updateBackdropVisibility()
         updateLoopWarning()
+        syncLookControls(state)
     }
 
     const requestFor = (candidateFormat: ExportFormat, recipe: SceneRecipeV2, scale?: ExportScale): RenderRequest => {
@@ -295,7 +360,8 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
         const framing = framed === 1 ? '' : `, framed ${trimmed(Number(framed.toFixed(2)))}× wide for its outer layers`
         const canvasNote = format === 'png' ? ` on a ${recipe.canvas.width}×${recipe.canvas.height} canvas` : ''
         $('export-size-detail').textContent = `${recipe.pixels} px planet${framing}, zoomed ${recipe.export.scale}× with hard pixel edges${canvasNote}.`
-        setHidden($('export-size-warning'), format !== 'png' || (frame <= recipe.canvas.width && frame <= recipe.canvas.height))
+        const art = fitCanvasToArt(canonicalFrameSize(recipe.celestialType, recipe.pixels), recipe.export.scale, artFor(recipe))
+        setHidden($('export-size-warning'), format !== 'png' || (art.width <= recipe.canvas.width && art.height <= recipe.canvas.height))
     }
 
     // preflight already speaks plain English, so pass its sentence through rather than prefixing our own.
@@ -353,29 +419,60 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
         download.disabled = selectedReasons.length > 0 || controller !== null
     }
 
+    // Everything that changes the body's silhouette; the light and placement never do.
+    const artKey = (recipe: SceneRecipeV2): string => JSON.stringify([
+        recipe.celestialType, recipe.seed, recipe.pixels, recipe.layers, recipe.body.phase, recipe.body.rotation,
+    ])
+
+    // The newest measured art box for this frame size; a pose change keeps it until the next render lands.
+    function artFor(recipe: SceneRecipeV2): ArtBox | null {
+        return previewArt?.cells === canonicalFrameSize(recipe.celestialType, recipe.pixels) ? previewArt.box : null
+    }
+
+    const previewArtFresh = (recipe: SceneRecipeV2): boolean => previewArt?.key === artKey(recipe)
+
     // PNG previews its whole canvas; GIF and spritesheet preview exactly their square, always-centered frame.
-    const previewFrame = (recipe: SceneRecipeV2): { width: number, height: number, center: Vec2 } => {
-        if (format === 'png') return { width: recipe.canvas.width, height: recipe.canvas.height, center: recipe.body.center }
+    const previewFrame = (recipe: SceneRecipeV2): { width: number, height: number } => {
+        if (format === 'png') return { width: recipe.canvas.width, height: recipe.canvas.height }
         const size = bodyFrameSize(recipe.celestialType, recipe.pixels, recipe.export.scale)
-        return { width: size, height: size, center: [0.5, 0.5] }
+        return { width: size, height: size }
     }
 
-    const previewBodyPixels = (recipe: SceneRecipeV2): CanvasBody => {
+    /* The body exactly where the exporter puts it, mapped from export to preview pixels. The art center carries
+       the handle; the frame center anchors the light, which is body-local to the frame. */
+    const previewGeometry = (recipe: SceneRecipeV2): PreviewGeometry => {
         const frame = previewFrame(recipe)
-        const size = bodyFrameSize(recipe.celestialType, recipe.pixels, recipe.export.scale) * canvas.width / frame.width
-        return composerBodyToCanvasPixels({ center: frame.center, light: recipe.body.light }, size, canvas.width, canvas.height)
+        const cells = canonicalFrameSize(recipe.celestialType, recipe.pixels)
+        const scale = recipe.export.scale
+        const placement = format === 'png'
+            ? placeBody(recipe.body.center, frame.width, frame.height, cells, scale, artFor(recipe))
+            : { left: 0, top: 0, size: cells * scale, art: { x: 0, y: 0, width: cells, height: cells } }
+        const scaleX = canvas.width / frame.width
+        const scaleY = canvas.height / frame.height
+        const sizeX = placement.size * scaleX
+        const sizeY = placement.size * scaleY
+        const frameCenter: Vec2 = [placement.left * scaleX + sizeX / 2, placement.top * scaleY + sizeY / 2]
+        return {
+            left: placement.left * scaleX, top: placement.top * scaleY, sizeX, sizeY, scaleX,
+            artCenter: [
+                (placement.left + (placement.art.x + placement.art.width / 2) * scale) * scaleX,
+                (placement.top + (placement.art.y + placement.art.height / 2) * scale) * scaleY,
+            ],
+            light: recipe.body.light && [frameCenter[0] + recipe.body.light[0] * sizeX, frameCenter[1] + recipe.body.light[1] * sizeY],
+        }
     }
 
-    const drawGuides = (context: CanvasRenderingContext2D, center: Vec2): void => {
+    const drawGuides = (context: CanvasRenderingContext2D, recipe: SceneRecipeV2): void => {
         context.save()
         context.strokeStyle = 'rgba(129,140,248,.85)'
         context.lineWidth = 1
         context.setLineDash([5, 4])
-        if (Math.abs(center[0] - context.canvas.width / 2) < 1) {
-            context.beginPath(); context.moveTo(context.canvas.width / 2, 0); context.lineTo(context.canvas.width / 2, context.canvas.height); context.stroke()
+        const { width, height } = context.canvas
+        if (isCentered(recipe.body.center[0])) {
+            context.beginPath(); context.moveTo(width / 2, 0); context.lineTo(width / 2, height); context.stroke()
         }
-        if (Math.abs(center[1] - context.canvas.height / 2) < 1) {
-            context.beginPath(); context.moveTo(0, context.canvas.height / 2); context.lineTo(context.canvas.width, context.canvas.height / 2); context.stroke()
+        if (isCentered(recipe.body.center[1])) {
+            context.beginPath(); context.moveTo(0, height / 2); context.lineTo(width, height / 2); context.stroke()
         }
         context.restore()
     }
@@ -397,19 +494,18 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
         canvas.height = Math.max(1, Math.round(height))
     }
 
-    const positionHandles = (recipe: SceneRecipeV2): void => {
-        const body = previewBodyPixels(recipe)
+    const positionHandles = (geometry: PreviewGeometry): void => {
         const bounds = canvas.getBoundingClientRect()
         const scaleX = bounds.width / canvas.width
         const scaleY = bounds.height / canvas.height
-        bodyHandle.style.left = `${canvas.offsetLeft + body.center[0] * scaleX}px`
-        bodyHandle.style.top = `${canvas.offsetTop + body.center[1] * scaleY}px`
-        bodyHandle.style.setProperty('--export-body-handle-size', `${Math.max(16, Math.min(36, body.size * Math.min(scaleX, scaleY) * 0.5))}px`)
+        bodyHandle.style.left = `${canvas.offsetLeft + geometry.artCenter[0] * scaleX}px`
+        bodyHandle.style.top = `${canvas.offsetTop + geometry.artCenter[1] * scaleY}px`
+        bodyHandle.style.setProperty('--export-body-handle-size', `${Math.max(16, Math.min(36, geometry.sizeX * scaleX * 0.5))}px`)
         bodyHandle.hidden = format !== 'png'
-        lightHandle.hidden = body.light === null
-        if (body.light) {
-            lightHandle.style.left = `${canvas.offsetLeft + body.light[0] * scaleX}px`
-            lightHandle.style.top = `${canvas.offsetTop + body.light[1] * scaleY}px`
+        lightHandle.hidden = geometry.light === null
+        if (geometry.light) {
+            lightHandle.style.left = `${canvas.offsetLeft + geometry.light[0] * scaleX}px`
+            lightHandle.style.top = `${canvas.offsetTop + geometry.light[1] * scaleY}px`
         }
     }
 
@@ -444,10 +540,17 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
         }
         context.clearRect(0, 0, canvas.width, canvas.height)
         if (previewBackdropCanvas) context.drawImage(previewBackdropCanvas, 0, 0, canvas.width, canvas.height)
-        const body = previewBodyPixels(recipe)
-        if (previewBody) context.drawImage(previewBody, body.center[0] - body.size / 2, body.center[1] - body.size / 2, body.size, body.size)
-        if (format === 'png') drawGuides(context, body.center)
-        positionHandles(recipe)
+        const geometry = previewGeometry(recipe)
+        if (previewBody) context.drawImage(previewBody, geometry.left, geometry.top, geometry.sizeX, geometry.sizeY)
+        // The exporter's whole-pixel shift, scaled to the preview and never below one preview pixel.
+        const aberration = effectiveChromaticAberration(shown, frame.width)
+        if (aberration > 0) {
+            const image = context.getImageData(0, 0, canvas.width, canvas.height)
+            applyChromaticAberration(image.data, canvas.width, canvas.height, Math.max(1, Math.round(aberration * geometry.scaleX)))
+            context.putImageData(image, 0, 0)
+        }
+        if (format === 'png') drawGuides(context, recipe)
+        positionHandles(geometry)
     }
 
     const renderPreview = async (): Promise<void> => {
@@ -462,6 +565,7 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
             state = recipe
             options.onRecipeChange(recipe)
             updateAdmission(recipe)
+            syncLookControls(recipe)
         } catch (error) {
             showError(visitorMessage(error, 'Those settings do not work together. Try adjusting them.'), 'preview')
             download.disabled = true
@@ -496,7 +600,12 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
                 requestId: 'preview', signal: previewAbort.signal,
             })
             if (previewAbort.signal.aborted || generation !== previewGeneration) return
-            previewBody = frameCanvas(frame)
+            acceptFrame(frame, recipe)
+            if (fitPending) {
+                fitPending = false
+                applyFit()
+                return
+            }
             drawPreview(drag ? state : recipe)
         } catch (error) {
             if (!previewAbort.signal.aborted && generation === previewGeneration) {
@@ -504,6 +613,47 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
                 showError(visitorMessage(error, 'The preview could not be drawn. Try different settings.'), 'preview')
             }
         }
+    }
+
+    function acceptFrame(frame: ExportFrame, recipe: SceneRecipeV2): void {
+        previewBody = frameCanvas(frame)
+        previewArt = { key: artKey(recipe), cells: frame.width, box: alphaBounds(frame.pixels, frame.width, frame.height) }
+    }
+
+    /* Light moves re-render the body, so coalesce them: one render in flight, at most one queued, each taking
+       the newest light. The old 80 ms debounce restarted on every move, so a steady drag never relit. */
+    const runRelight = async (): Promise<void> => {
+        relightQueued = false
+        if (!relightWanted) return
+        relightWanted = false
+        const session = previewSession
+        const signal = previewController?.signal
+        const recipe = state
+        // A session built for other settings cannot relight this recipe; the full preview path rebuilds it.
+        if (!session || !signal || signal.aborted || workspace.hidden
+            || session.recipe.pixels !== recipe.pixels || session.recipe.celestialType !== recipe.celestialType) {
+            schedulePreview()
+            return
+        }
+        try {
+            Object.assign(session.recipe.body, recipe.body)
+            const frame = await session.renderFrame(recipe.body.phase, { requestId: 'preview-light', signal })
+            if (signal.aborted || session !== previewSession || workspace.hidden) return
+            acceptFrame(frame, recipe)
+            drawPreview(state)
+        } catch (error) {
+            if (!signal.aborted) {
+                console.error('Export preview failed.', error)
+                showError(visitorMessage(error, 'The preview could not be drawn. Try different settings.'), 'preview')
+            }
+        }
+    }
+
+    const requestRelight = (): void => {
+        relightWanted = true
+        if (relightQueued) return
+        relightQueued = true
+        previewWork = previewWork.then(runRelight, runRelight)
     }
 
     const schedulePreview = (): void => {
@@ -525,7 +675,9 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
     const open = (nextFormat: ComposerFormat): void => {
         format = nextFormat
         for (const button of formatButtons) button.setAttribute('aria-pressed', String(button.dataset.exportFormat === format))
-        state = validateSceneRecipe(options.currentRecipe())
+        state = seedLook(validateSceneRecipe(options.currentRecipe()))
+        // A Fit left waiting by the last session must not resize this one's canvas.
+        fitPending = false
         changedSinceOpen = false
         statusOutput.textContent = ''
         errorSource = null
@@ -555,7 +707,7 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
         syncBodyFields(recipe)
         options.onRecipeChange(recipe)
         drawPreview(recipe)
-        if (relight) schedulePreview()
+        if (relight) requestRelight()
     }
 
     form.addEventListener('input', (event) => {
@@ -564,7 +716,7 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
         updateBackdropVisibility()
         updateAdmission()
         const target = event.target as HTMLElement
-        if (['export-phase', 'export-preview-phase', 'export-pixels'].includes(target.id) || !previewBody) {
+        if (['export-phase', 'export-preview-phase', 'export-pixels', 'export-dither'].includes(target.id) || !previewBody) {
             schedulePreview()
             return
         }
@@ -575,6 +727,7 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
         }
         options.onRecipeChange(state)
         if (target.id === 'export-width' || target.id === 'export-height') sizePreviewCanvas()
+        syncLookControls(state)
         drawPreview(state)
     })
     form.addEventListener('change', (event) => {
@@ -641,6 +794,7 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
             // Invalid fields fall back to the last recipe that validated.
         }
         cancelDrag()
+        fitPending = false
         controller?.abort(new DOMException('The export was canceled.', 'AbortError'))
         previewController?.abort(new DOMException('The preview was closed.', 'AbortError'))
         previewController = null
@@ -678,6 +832,22 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
         }
         schedulePreview()
     })
+    // Sizes the canvas to the measured art box, so the planet touches all four edges with no margin.
+    function applyFit(): void {
+        let recipe: SceneRecipeV2
+        try {
+            recipe = recipeFromControls()
+        } catch {
+            return
+        }
+        const fitted = fitCanvasToArt(canonicalFrameSize(recipe.celestialType, recipe.pixels), recipe.export.scale, artFor(recipe))
+        $<HTMLInputElement>('export-width').value = String(fitted.width)
+        $<HTMLInputElement>('export-height').value = String(fitted.height)
+        $<HTMLInputElement>('export-body-x').value = '0.5'
+        $<HTMLInputElement>('export-body-y').value = '0.5'
+        $<HTMLSelectElement>('export-size-preset').value = 'custom'
+        schedulePreview()
+    }
     $('export-fit-canvas').addEventListener('click', () => {
         changedSinceOpen = true
         let recipe: SceneRecipeV2
@@ -686,13 +856,12 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
         } catch {
             return
         }
-        const frame = String(bodyFrameSize(recipe.celestialType, recipe.pixels, recipe.export.scale))
-        $<HTMLInputElement>('export-width').value = frame
-        $<HTMLInputElement>('export-height').value = frame
-        $<HTMLInputElement>('export-body-x').value = '0.5'
-        $<HTMLInputElement>('export-body-y').value = '0.5'
-        $<HTMLSelectElement>('export-size-preset').value = 'custom'
-        schedulePreview()
+        // The art box belongs to one pose, so a stale one waits for the next render before fitting.
+        if (previewArtFresh(recipe)) applyFit()
+        else {
+            fitPending = true
+            schedulePreview()
+        }
     })
 
     // Plain Pointer Events with capture: handles live in canvas space, so no drag-and-drop layer is needed.
@@ -703,29 +872,20 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
             (event.clientX - drag.startClient[0]) * canvas.width / bounds.width,
             (event.clientY - drag.startClient[1]) * canvas.height / bounds.height,
         ]
-        const start = drag.startBody
-        let moved: CanvasBody
+        const start = drag.startRecipe.body
         if (drag.kind === 'body') {
-            const center: [number, number] = [start.center[0] + delta[0], start.center[1] + delta[1]]
+            // The normalized center tracks the art center, so a preview-pixel delta maps straight onto it.
+            const center: [number, number] = [start.center[0] + delta[0] / canvas.width, start.center[1] + delta[1] / canvas.height]
             if (!event.altKey) {
-                if (Math.abs(center[0] - canvas.width / 2) < SNAP_DISTANCE) center[0] = canvas.width / 2
-                if (Math.abs(center[1] - canvas.height / 2) < SNAP_DISTANCE) center[1] = canvas.height / 2
+                if (Math.abs(center[0] - 0.5) * canvas.width < SNAP_DISTANCE) center[0] = 0.5
+                if (Math.abs(center[1] - 0.5) * canvas.height < SNAP_DISTANCE) center[1] = 0.5
             }
-            const shift: Vec2 = [center[0] - start.center[0], center[1] - start.center[1]]
-            moved = { ...start, center, light: start.light && [start.light[0] + shift[0], start.light[1] + shift[1]] }
-        } else {
-            if (!start.light) return null
-            moved = { ...start, light: [start.light[0] + delta[0], start.light[1] + delta[1]] }
+            return { ...drag.startRecipe, body: { ...start, center } }
         }
-        const normalized = canvasPixelsToComposerBody(moved, canvas.width, canvas.height)
-        return {
-            ...drag.startRecipe,
-            body: {
-                ...drag.startRecipe.body,
-                center: drag.kind === 'body' ? normalized.center : drag.startRecipe.body.center,
-                light: normalized.light && (drag.kind === 'light' ? clampBodyLocalLight(normalized.light) : normalized.light),
-            },
-        }
+        if (!start.light) return null
+        const { sizeX, sizeY } = drag.startGeometry
+        const light = clampBodyLocalLight([start.light[0] + delta[0] / sizeX, start.light[1] + delta[1] / sizeY])
+        return { ...drag.startRecipe, body: { ...start, light } }
     }
 
     const startDrag = (kind: DragKind, event: PointerEvent, target: HTMLElement): void => {
@@ -736,11 +896,15 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
         } catch {
             return
         }
-        const startBody = previewBodyPixels(recipe)
-        if (kind === 'light' && !startBody.light) return
+        if (kind === 'light' && !recipe.body.light) return
         event.preventDefault()
+        // preventDefault also cancels the click's focus, and arrow-key nudges listen on the focused target.
+        target.focus({ preventScroll: true })
         target.setPointerCapture(event.pointerId)
-        drag = { kind, pointerId: event.pointerId, target, startClient: [event.clientX, event.clientY], startBody, startRecipe: recipe, moved: false }
+        drag = {
+            kind, pointerId: event.pointerId, target, startClient: [event.clientX, event.clientY],
+            startGeometry: previewGeometry(recipe), startRecipe: recipe, moved: false,
+        }
     }
 
     const moveDrag = (event: PointerEvent): void => {
@@ -751,7 +915,7 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
         state = recipe
         syncBodyFields(recipe)
         drawPreview(recipe)
-        if (drag.kind === 'light') schedulePreview()
+        if (drag.kind === 'light') requestRelight()
     }
 
     const endDrag = (event: PointerEvent): void => {
@@ -783,10 +947,10 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
         } catch {
             return
         }
-        const body = previewBodyPixels(recipe)
+        const body = previewGeometry(recipe)
         const bounds = canvas.getBoundingClientRect()
         const point: Vec2 = [(event.clientX - bounds.left) * canvas.width / bounds.width, (event.clientY - bounds.top) * canvas.height / bounds.height]
-        if (Math.abs(point[0] - body.center[0]) <= body.size / 2 && Math.abs(point[1] - body.center[1]) <= body.size / 2) {
+        if (point[0] >= body.left && point[0] <= body.left + body.sizeX && point[1] >= body.top && point[1] <= body.top + body.sizeY) {
             startDrag('body', event, canvas)
         }
     })
@@ -825,7 +989,7 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
     lightHandle.addEventListener('keydown', (event) => { nudge(event, 'light') })
 
     const replaceRecipe = (recipe: SceneRecipeV2): void => {
-        state = validateSceneRecipe(recipe)
+        state = seedLook(validateSceneRecipe(recipe))
         syncControls()
         if (!workspace.hidden) schedulePreview()
     }
