@@ -25,7 +25,7 @@
                     <canvas id="export-preview" class="export-preview" tabindex="0" aria-label="Export preview. Drag the planet or light to position them."></canvas>
                     <button id="export-body-handle" class="export-drag-handle export-body-handle" type="button" aria-label="Move planet"></button>
                     <button id="export-light-handle" class="export-drag-handle export-light-handle" type="button" aria-label="Move light"></button>
-                    <p id="export-preview-help" class="export-preview-help">Drag to compose · Arrow keys nudge · Alt bypasses snapping</p>
+                    <p id="export-preview-help" class="export-preview-help">Drag the planet or its light · Arrow keys nudge (Shift for 10) · Alt skips center snapping</p>
                 </div>
                 <form id="export-form" class="export-controls" hidden>
                     <header class="flex items-center justify-between gap-3 border-b border-zinc-700 pb-3">
@@ -36,6 +36,17 @@
                         <button id="export-close" type="button" class="export-icon-button" aria-label="Close export workspace">×</button>
                     </header>
 
+                    <fieldset class="flex flex-col gap-2">
+                        <legend class="mb-1 text-xs font-medium text-zinc-300">Planet Size</legend>
+                        <div class="grid grid-cols-2 gap-2">
+                            <label class="export-field"><span>Pixels (Detail)</span><input id="export-pixels" type="number" min="12" max="2048" step="1" value="100" inputmode="numeric"></label>
+                            <label class="export-field"><span>Zoom</span><select id="export-scale"><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option><option value="8">8×</option></select></label>
+                        </div>
+                        <output id="export-size-readout" class="rounded border border-zinc-700 bg-zinc-800/60 px-2 py-1.5 font-mono text-sm text-zinc-100" aria-live="polite">Planet in file: 100×100 px</output>
+                        <p id="export-size-detail" class="text-xs text-zinc-400">100 px planet × 1 zoom, pixel-sharp</p>
+                        <p id="export-size-warning" class="export-warning" hidden>The planet is bigger than the canvas, so parts of it will be cropped.</p>
+                    </fieldset>
+
                     <div id="export-static-controls" class="flex flex-col gap-4">
                         <fieldset class="flex flex-col gap-2">
                             <legend class="mb-1 text-xs font-medium text-zinc-300">Canvas</legend>
@@ -45,37 +56,19 @@
                                 <label class="export-field"><span>Height</span><input id="export-height" type="number" min="1" max="32768" step="1" value="1080" inputmode="numeric"></label>
                             </div>
                             <label class="export-field"><span>Preset</span><select id="export-size-preset"><option value="viewport">Current View</option><option value="1920x1080">1920 × 1080</option><option value="1080x1080">1080 × 1080</option><option value="3840x2160">3840 × 2160</option><option value="custom">Custom</option></select></label>
+                            <button id="export-fit-canvas" type="button" class="export-secondary-button">Fit canvas to planet</button>
                         </fieldset>
 
                         <fieldset class="flex flex-col gap-2">
                             <legend class="mb-1 text-xs font-medium text-zinc-300">Composition</legend>
-                            <div class="grid grid-cols-3 gap-2">
-                                <label class="export-field"><span>Body X</span><input id="export-body-x" type="number" step="any" value="0.5"></label>
-                                <label class="export-field"><span>Body Y</span><input id="export-body-y" type="number" step="any" value="0.5"></label>
-                                <label class="export-field"><span>Body Size</span><input id="export-body-scale" type="number" step="any" value="1"></label>
+                            <div class="grid grid-cols-2 gap-2">
+                                <label class="export-field"><span>Planet X</span><input id="export-body-x" type="number" step="any" value="0.5"></label>
+                                <label class="export-field"><span>Planet Y</span><input id="export-body-y" type="number" step="any" value="0.5"></label>
                             </div>
                             <label class="export-field"><span>Animation Position</span><input id="export-phase" type="range" min="0" max="1" step="any" value="0"></label>
-                            <label class="flex items-center justify-between gap-3 text-xs text-zinc-300">Snap to pixel scale<input id="export-snap" type="checkbox" class="toggle" checked></label>
                         </fieldset>
 
-                        <fieldset class="flex flex-col gap-2">
-                            <legend class="mb-1 text-xs font-medium text-zinc-300">Background</legend>
-                            <label class="export-field"><span>Mode</span><select id="export-background"><option value="transparent">Transparent</option><option value="matte">Solid Matte</option><option value="stars">Stars</option><option value="gradient">Gradient</option><option value="stars-gradient">Stars on Gradient</option></select></label>
-                            <div id="export-background-settings" class="grid grid-cols-2 gap-2">
-                                <label class="export-field"><span>Density</span><input id="export-star-density" type="range" min="0" max="2" step="any" value="1"></label>
-                                <label class="export-field"><span>Brightness</span><input id="export-star-brightness" type="range" min="0" max="2" step="any" value="1"></label>
-                                <label class="export-field"><span>Star Size</span><input id="export-star-scale" type="range" min="0.25" max="4" step="any" value="1"></label>
-                                <label class="export-field"><span>Special Stars</span><input id="export-special-stars" type="range" min="0" max="1" step="any" value="1"></label>
-                                <label class="export-field"><span>Gradient Position</span><input id="export-gradient-phase" type="range" min="0" max="1" step="any" value="0"></label>
-                                <label class="export-field"><span>Matte</span><input id="export-matte-color" type="color" value="#000000"></label>
-                            </div>
-                            <div class="grid grid-cols-[1fr_auto] gap-2">
-                                <label class="export-field"><span>Background Seed</span><input id="export-background-seed" type="text" inputmode="numeric" value="1"></label>
-                                <button id="export-background-reroll" type="button" class="export-secondary-button self-end">Reroll</button>
-                            </div>
-                        </fieldset>
-
-                        <fieldset class="flex flex-col gap-2">
+                        <fieldset class="flex min-w-0 flex-col gap-2">
                             <legend class="mb-1 text-xs font-medium text-zinc-300">PNG Output</legend>
                             <label class="export-field"><span>Download</span><select id="export-png-output"><option value="composite">PNG Image</option><option value="scene-package">PNG + Recipe ZIP (can be reopened)</option></select></label>
                             <label class="flex items-center justify-between gap-3 text-xs text-zinc-300"><span>Save the planet's visible parts as separate images</span><input id="export-layer-passes" type="checkbox" class="toggle"></label>
@@ -92,9 +85,8 @@
                             <label class="export-field"><span>Preview Position</span><input id="export-preview-phase" type="range" min="0" max="1" step="any" value="0"></label>
                             <div class="grid grid-cols-2 gap-2">
                                 <label class="export-field"><span>Direction</span><select id="export-direction"><option value="forward">Forward</option><option value="reverse">Reverse</option><option value="ping-pong" title="Plays forward, then back.">Ping-Pong</option></select></label>
-                                <label class="export-field"><span>Scale</span><select id="export-scale"><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option><option value="8">8×</option></select></label>
+                                <label class="export-field"><span>Background</span><select id="export-animation-background"><option value="transparent">Transparent</option><option value="current">Frozen Backdrop</option></select></label>
                             </div>
-                            <label class="export-field"><span>Background</span><select id="export-animation-background"><option value="transparent">Transparent</option><option value="current">Current Backdrop</option></select></label>
                             <p id="export-loop-warning" class="export-warning" aria-live="polite" hidden>Partial ranges may not loop seamlessly.</p>
                         </fieldset>
 
@@ -117,6 +109,28 @@
                             </div>
                         </fieldset>
                     </div>
+
+                    <fieldset id="export-backdrop-controls" class="flex flex-col gap-2">
+                        <legend class="mb-1 text-xs font-medium text-zinc-300">Backdrop</legend>
+                        <div class="grid grid-cols-[1fr_auto] items-end gap-2">
+                            <label class="export-field"><span>Base</span><select id="export-background"><option value="transparent">Transparent</option><option value="solid">Solid Color</option><option value="gradient">Gradient</option></select></label>
+                            <label id="export-matte-field" class="export-field"><span>Color</span><input id="export-matte-color" type="color" value="#000000"></label>
+                        </div>
+                        <label id="export-gradient-field" class="export-field"><span>Gradient Position</span><input id="export-gradient-phase" type="range" min="0" max="1" step="any" value="0"></label>
+                        <label class="flex items-center justify-between gap-3 text-xs text-zinc-300"><span>Stars on top</span><input id="export-stars" type="checkbox" class="toggle" checked></label>
+                        <div id="export-star-settings" class="flex flex-col gap-2">
+                            <div class="grid grid-cols-2 gap-2">
+                                <label class="export-field"><span>Density</span><input id="export-star-density" type="range" min="0" max="2" step="any" value="1"></label>
+                                <label class="export-field"><span>Brightness</span><input id="export-star-brightness" type="range" min="0" max="2" step="any" value="1"></label>
+                                <label class="export-field"><span>Star Size</span><input id="export-star-scale" type="range" min="0.25" max="4" step="any" value="1"></label>
+                                <label class="export-field"><span>Special Stars</span><input id="export-special-stars" type="range" min="0" max="1" step="any" value="1"></label>
+                            </div>
+                            <div class="grid grid-cols-[1fr_auto] gap-2">
+                                <label class="export-field"><span>Star Seed</span><input id="export-background-seed" type="text" inputmode="numeric" value="1"></label>
+                                <button id="export-background-reroll" type="button" class="export-secondary-button self-end">Reroll</button>
+                            </div>
+                        </div>
+                    </fieldset>
 
                     <footer class="export-footer">
                         <p id="export-status" class="min-h-4 text-xs text-zinc-400" role="status" aria-live="polite"></p>
@@ -237,7 +251,7 @@
                 <div class="grid grid-cols-3 gap-2">
                     <button id="export-png" type="button" class="export-format-button" data-export-format="png" aria-controls="export-workspace" aria-pressed="false">PNG</button>
                     <button id="export-gif" type="button" class="export-format-button" data-export-format="gif" aria-controls="export-workspace" aria-pressed="false">GIF</button>
-                    <button id="export-spritesheet" type="button" class="export-format-button" data-export-format="spritesheet" aria-controls="export-workspace" aria-pressed="false">Spritesheet</button>
+                    <button id="export-spritesheet" type="button" data-export-format="spritesheet" aria-controls="export-workspace" aria-pressed="false" aria-label="Spritesheet" class="export-format-button @container whitespace-nowrap"><span class="@max-[11ch]:hidden">Spritesheet</span><span class="hidden @max-[11ch]:inline" aria-hidden="true">Sprites</span></button>
                 </div>
             </fieldset>
 

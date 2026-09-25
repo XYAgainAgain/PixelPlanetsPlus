@@ -1,15 +1,16 @@
-import { DragDropManager, Draggable, Droppable, Feedback, PointerSensor, type DragMoveEvent } from '@dnd-kit/dom'
 import { exportGif } from './gif'
 import { createBackdropRasterizer } from './backdrop'
 import {
+    bodyFrameSize,
+    canonicalFrameSize,
     canvasPixelsToComposerBody,
     composerBodyToCanvasPixels,
     nudgeNormalizedCenter,
-    snapBodySizeToIntegerScale,
+    type CanvasBody,
 } from './layout'
 import { exportCompositePng } from './png'
 import { preflightRenderRequest, type PreflightLimits } from './preflight'
-import { validateSceneRecipe } from './recipe'
+import { MAX_FRAMES_PER_SECOND, validateSceneRecipe } from './recipe'
 import { bodyLocalToLightUv, createExportSession, lightUvToBodyLocal, type ExportFrame } from './runtime'
 import { exportScenePackage } from './scenePackage'
 import { exportPngSequence } from './sequence'
@@ -17,25 +18,28 @@ import { exportSpritesheet } from './spritesheet'
 import { loopsSeamlessly, generatePhaseSamples } from './timing'
 import { acquireExportSaveTarget, saveExportFile } from './download'
 import { uniquePhases, type AnimatedExportRunOptions } from './animated'
-import type { ExportBackend, ExportRunner } from './contract'
-import type { BackdropV1, ExportFormat, ExportScale, PlaybackDirection, RenderProgress, RenderRequest, SceneRecipeV1, Vec2 } from './types'
-import { PLANETS } from '../tsl/values'
+import { exportExtension, exportFilename, exportMediaType } from './filenames'
+import type { ExportRunner } from './contract'
+import type { GpuHost } from '../gpu'
+import type { BackdropBaseV2, BackdropV2, ExportFormat, ExportScale, PlaybackDirection, RenderProgress, RenderRequest, SceneRecipeV2, Vec2 } from './types'
 
 type ComposerFormat = 'png' | 'gif' | 'spritesheet'
+type DragKind = 'body' | 'light'
 
 export interface ComposerOptions {
     stage: HTMLElement
-    backend: () => ExportBackend
-    textureLimit: () => number
-    currentRecipe: () => SceneRecipeV1
-    onRecipeChange: (recipe: SceneRecipeV1) => void
-    onClose: (recipe: SceneRecipeV1, changed: boolean) => void
+    gpu: GpuHost
+    currentRecipe: () => SceneRecipeV2
+    // Writes the planet's pixel count through to the live control and returns the value it accepted.
+    setPixels: (pixels: number) => number
+    onRecipeChange: (recipe: SceneRecipeV2) => void
+    onClose: (recipe: SceneRecipeV2, changed: boolean) => void
 }
 
 export interface SceneComposer {
     open: (format: ComposerFormat) => void
-    recipe: () => SceneRecipeV1
-    replaceRecipe: (recipe: SceneRecipeV1) => void
+    recipe: () => SceneRecipeV2
+    replaceRecipe: (recipe: SceneRecipeV2) => void
     refreshFromLive: () => void
 }
 
@@ -51,14 +55,19 @@ const trimmed = (value: number): string => String(Number(value.toFixed(4)))
 const numberValue = (id: string): number => Number($<HTMLInputElement>(id).value)
 const integerValue = (id: string, minimum: number): number => Math.max(minimum, Math.round(numberValue(id)))
 const setHidden = (element: HTMLElement, hidden: boolean): void => { element.hidden = hidden }
+const LIGHT_LIMIT = 0.85
+const SNAP_DISTANCE = 6
+// Animated previews rasterize the frozen backdrop at the exported frame size up to this edge, like the exporter.
+const FROZEN_BACKDROP_PREVIEW_LIMIT = 2048
+const TRANSPARENT: BackdropV2 = { base: { kind: 'transparent' }, stars: null }
 const clampBodyLocalLight = (light: Vec2): Vec2 => {
     const local = lightUvToBodyLocal(bodyLocalToLightUv(light))
     const distance = Math.hypot(...local)
-    if (distance <= 0.85) return local
-    const scale = 0.85 / distance
+    if (distance <= LIGHT_LIMIT) return local
+    const scale = LIGHT_LIMIT / distance
     return [local[0] * scale, local[1] * scale]
 }
-const previewBackdrop = async (context: CanvasRenderingContext2D, recipe: SceneRecipeV1): Promise<void> => {
+const previewBackdrop = async (context: CanvasRenderingContext2D, recipe: SceneRecipeV2): Promise<void> => {
     const { width, height } = context.canvas
     const pixels = (await createBackdropRasterizer(recipe.backdrop, width, height)).renderBand(0, height)
     context.putImageData(new ImageData(new Uint8ClampedArray(pixels), width, height), 0, 0)
@@ -97,6 +106,7 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
     const download = $<HTMLButtonElement>('export-download')
     const cancel = $<HTMLButtonElement>('export-cancel')
     const scaleSelect = $<HTMLSelectElement>('export-scale')
+    const pixelsInput = $<HTMLInputElement>('export-pixels')
     const formatButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('.export-format-button'))
     panel.appendChild(form)
     let state = validateSceneRecipe(options.currentRecipe())
@@ -113,54 +123,86 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
     let changedSinceOpen = false
     let controller: AbortController | null = null
     let requestCounter = 0
-    const dragManager = new DragDropManager({ sensors: [PointerSensor] })
-    const feedback = [Feedback.configure({ feedback: 'none' })]
-    const previewDrop = new Droppable({ id: 'export-preview-drop', element: canvas, accept: 'composer-handle' }, dragManager)
-    new Draggable({ id: 'export-body-drag', element: bodyHandle, type: 'composer-handle', plugins: feedback }, dragManager)
-    new Draggable({ id: 'export-light-drag', element: lightHandle, type: 'composer-handle', plugins: feedback }, dragManager)
-    let dragStartBody: ReturnType<typeof composerBodyToCanvasPixels> | null = null
-    let dragRecipe: SceneRecipeV1 | null = null
+    let errorSource: 'preview' | 'export' | null = null
+    let drag: {
+        kind: DragKind
+        pointerId: number
+        target: HTMLElement
+        startClient: Vec2
+        startBody: CanvasBody
+        startRecipe: SceneRecipeV2
+        moved: boolean
+    } | null = null
 
-    const backdropFromControls = (): BackdropV1 => {
+    // Preview and export share one alert, so a preview refresh must not clear an export failure.
+    const showError = (message: string, source: 'preview' | 'export'): void => {
+        errorSource = source
+        errorOutput.textContent = message
+        setHidden(errorOutput, false)
+    }
+    const clearError = (source: 'preview' | 'export'): void => {
+        if (errorSource !== source) return
+        errorSource = null
+        setHidden(errorOutput, true)
+    }
+
+    const backdropFromControls = (): BackdropV2 => {
         const kind = $<HTMLSelectElement>('export-background').value
-        if (kind === 'transparent') return { kind }
-        if (kind === 'matte') return { kind: 'solid', color: $<HTMLInputElement>('export-matte-color').value }
+        const base: BackdropBaseV2 = kind === 'solid' ? { kind, color: $<HTMLInputElement>('export-matte-color').value }
+            : kind === 'gradient' ? { kind, phase: numberValue('export-gradient-phase') }
+                : { kind: 'transparent' }
         return {
-            kind: kind as 'stars' | 'gradient' | 'stars-gradient',
-            seed: integerValue('export-background-seed', 0),
-            density: numberValue('export-star-density'),
-            brightness: numberValue('export-star-brightness'),
-            starScale: numberValue('export-star-scale'),
-            specialStarMix: numberValue('export-special-stars'),
-            gradientPhase: numberValue('export-gradient-phase'),
+            base,
+            stars: $<HTMLInputElement>('export-stars').checked ? {
+                seed: integerValue('export-background-seed', 0),
+                density: numberValue('export-star-density'),
+                brightness: numberValue('export-star-brightness'),
+                starScale: numberValue('export-star-scale'),
+                specialStarMix: numberValue('export-special-stars'),
+            } : null,
         }
     }
 
-    const recipeFromControls = (): SceneRecipeV1 => validateSceneRecipe({
-        ...state,
-        canvas: { width: integerValue('export-width', 1), height: integerValue('export-height', 1) },
-        body: {
-            ...state.body,
-            center: [numberValue('export-body-x'), numberValue('export-body-y')],
-            size: numberValue('export-body-scale'),
-            phase: format === 'png' ? numberValue('export-phase') : numberValue('export-preview-phase'),
-        },
-        backdrop: format !== 'png' && $<HTMLSelectElement>('export-animation-background').value === 'transparent'
-            ? { kind: 'transparent' }
-            : backdropFromControls(),
-        export: {
-            scale: Number(scaleSelect.value) as ExportScale,
-            frameCount: format === 'gif'
-                ? Math.max(1, Math.round(numberValue('export-fps') * numberValue('export-duration')))
-                : integerValue('export-frames', 1),
-            columns: integerValue('export-columns', 1),
-            margin: integerValue('export-margin', 0),
-            startPhase: numberValue('export-start-phase'),
-            endPhase: numberValue('export-end-phase'),
-            direction: $<HTMLSelectElement>('export-direction').value,
-            framesPerSecond: integerValue('export-fps', 1),
-        },
-    })
+    const recipeFromControls = (): SceneRecipeV2 => {
+        const framesPerSecond = Math.min(MAX_FRAMES_PER_SECOND, integerValue('export-fps', 1))
+        return validateSceneRecipe({
+            ...state,
+            pixels: Math.max(12, Math.min(2048, integerValue('export-pixels', 12))),
+            canvas: { width: integerValue('export-width', 1), height: integerValue('export-height', 1) },
+            body: {
+                ...state.body,
+                center: [numberValue('export-body-x'), numberValue('export-body-y')],
+                phase: format === 'png' ? numberValue('export-phase') : numberValue('export-preview-phase'),
+            },
+            backdrop: backdropFromControls(),
+            export: {
+                scale: Number(scaleSelect.value) as ExportScale,
+                frameCount: format === 'gif'
+                    ? Math.max(1, Math.round(framesPerSecond * numberValue('export-duration')))
+                    : integerValue('export-frames', 1),
+                columns: integerValue('export-columns', 1),
+                margin: integerValue('export-margin', 0),
+                startPhase: numberValue('export-start-phase'),
+                endPhase: numberValue('export-end-phase'),
+                direction: $<HTMLSelectElement>('export-direction').value,
+                framesPerSecond,
+            },
+        })
+    }
+
+    // Animated formats may drop the backdrop for this export only; the configured one stays in the recipe.
+    const exportRecipe = (recipe: SceneRecipeV2): SceneRecipeV2 =>
+        format !== 'png' && $<HTMLSelectElement>('export-animation-background').value === 'transparent'
+            ? { ...recipe, backdrop: TRANSPARENT }
+            : recipe
+
+    const updateBackdropVisibility = (): void => {
+        const base = $<HTMLSelectElement>('export-background').value
+        setHidden($('export-backdrop-controls'), format !== 'png' && $<HTMLSelectElement>('export-animation-background').value === 'transparent')
+        setHidden($('export-matte-field'), base !== 'solid')
+        setHidden($('export-gradient-field'), base !== 'gradient')
+        setHidden($('export-star-settings'), !$<HTMLInputElement>('export-stars').checked)
+    }
 
     const updateLoopWarning = (): void => {
         const direction = $<HTMLSelectElement>('export-direction').value as PlaybackDirection
@@ -169,12 +211,16 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
         ))
     }
 
+    const syncBodyFields = (recipe: SceneRecipeV2): void => {
+        $<HTMLInputElement>('export-body-x').value = trimmed(recipe.body.center[0])
+        $<HTMLInputElement>('export-body-y').value = trimmed(recipe.body.center[1])
+    }
+
     const syncControls = (): void => {
+        pixelsInput.value = String(state.pixels)
         $<HTMLInputElement>('export-width').value = String(state.canvas.width)
         $<HTMLInputElement>('export-height').value = String(state.canvas.height)
-        $<HTMLInputElement>('export-body-x').value = trimmed(state.body.center[0])
-        $<HTMLInputElement>('export-body-y').value = trimmed(state.body.center[1])
-        $<HTMLInputElement>('export-body-scale').value = trimmed(state.body.size)
+        syncBodyFields(state)
         $<HTMLInputElement>('export-phase').value = trimmed(state.body.phase)
         $<HTMLInputElement>('export-preview-phase').value = trimmed(state.body.phase)
         $<HTMLInputElement>('export-start-phase').value = String(state.export.startPhase)
@@ -186,29 +232,34 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
         $<HTMLInputElement>('export-margin').value = String(state.export.margin)
         $<HTMLInputElement>('export-fps').value = String(state.export.framesPerSecond)
         $<HTMLInputElement>('export-duration').value = String(state.export.frameCount / state.export.framesPerSecond)
-        const backdrop = state.backdrop
-        $<HTMLSelectElement>('export-background').value = backdrop.kind === 'solid' ? 'matte' : backdrop.kind
-        if (backdrop.kind === 'solid') $<HTMLInputElement>('export-matte-color').value = backdrop.color
-        if (backdrop.kind !== 'transparent' && backdrop.kind !== 'solid') {
-            $<HTMLInputElement>('export-background-seed').value = String(backdrop.seed)
-            $<HTMLInputElement>('export-star-density').value = String(backdrop.density)
-            $<HTMLInputElement>('export-star-brightness').value = String(backdrop.brightness)
-            $<HTMLInputElement>('export-star-scale').value = String(backdrop.starScale)
-            $<HTMLInputElement>('export-special-stars').value = String(backdrop.specialStarMix)
-            $<HTMLInputElement>('export-gradient-phase').value = String(backdrop.gradientPhase)
+        const { base, stars } = state.backdrop
+        $<HTMLSelectElement>('export-background').value = base.kind
+        if (base.kind === 'solid') $<HTMLInputElement>('export-matte-color').value = base.color
+        if (base.kind === 'gradient') $<HTMLInputElement>('export-gradient-phase').value = String(base.phase)
+        $<HTMLInputElement>('export-stars').checked = stars !== null
+        if (stars) {
+            $<HTMLInputElement>('export-background-seed').value = String(stars.seed)
+            $<HTMLInputElement>('export-star-density').value = String(stars.density)
+            $<HTMLInputElement>('export-star-brightness').value = String(stars.brightness)
+            $<HTMLInputElement>('export-star-scale').value = String(stars.starScale)
+            $<HTMLInputElement>('export-special-stars').value = String(stars.specialStarMix)
         }
+        updateBackdropVisibility()
         updateLoopWarning()
     }
 
-    const requestFor = (candidateFormat: ExportFormat, recipe: SceneRecipeV1, scale?: ExportScale): RenderRequest => ({
-        id: `${recipe.celestialType}-${recipe.seed}-${++requestCounter}`,
-        recipe: { ...recipe, export: { ...recipe.export, scale: scale ?? recipe.export.scale } },
-        format: candidateFormat,
-        includeMetadata: candidateFormat === 'spritesheet' || candidateFormat === 'png-sequence',
-        includeLayers: $<HTMLInputElement>('export-layer-passes').checked,
-    })
+    const requestFor = (candidateFormat: ExportFormat, recipe: SceneRecipeV2, scale?: ExportScale): RenderRequest => {
+        const source = exportRecipe(recipe)
+        return {
+            id: `${source.celestialType}-${source.seed}-${++requestCounter}`,
+            recipe: { ...source, export: { ...source.export, scale: scale ?? source.export.scale } },
+            format: candidateFormat,
+            includeMetadata: candidateFormat === 'spritesheet' || candidateFormat === 'png-sequence',
+            includeLayers: $<HTMLInputElement>('export-layer-passes').checked,
+        }
+    }
 
-    const preflightRequestFor = (candidateFormat: ExportFormat, recipe: SceneRecipeV1, scale?: ExportScale): RenderRequest => {
+    const preflightRequestFor = (candidateFormat: ExportFormat, recipe: SceneRecipeV2, scale?: ExportScale): RenderRequest => {
         const request = requestFor(candidateFormat, recipe, scale)
         if (candidateFormat !== 'spritesheet') return request
         const frameCount = uniquePhases(request).length
@@ -221,7 +272,7 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
     const limits = (): PreflightLimits => {
         const deviceMemory = (navigator as Navigator & { deviceMemory?: number }).deviceMemory
         return {
-            maxTextureDimension2D: options.textureLimit(),
+            maxTextureDimension2D: options.gpu.current().textureLimit,
             maxWorkingBytes: deviceMemory ? deviceMemory * 1024 ** 3 * 0.25 : 512 * 1024 ** 2,
             maxBlobBytes: 512 * 1024 ** 2,
         }
@@ -233,13 +284,35 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
         return $<HTMLSelectElement>('export-animation-output').value === 'sequence' ? 'png-sequence' : 'spritesheet'
     }
 
+    // Answers "how big is my planet in the file, and how sharp?" from the same math the exporters use.
+    const updateSizeReadout = (recipe: SceneRecipeV2, sheet?: { width: number, height: number }): void => {
+        const frame = bodyFrameSize(recipe.celestialType, recipe.pixels, recipe.export.scale)
+        const framed = canonicalFrameSize(recipe.celestialType, recipe.pixels) / recipe.pixels
+        const label = format === 'png' ? 'Planet in file' : 'Frame in file'
+        $('export-size-readout').textContent = format === 'spritesheet' && sheet && selectedExportFormat() === 'spritesheet'
+            ? `${label}: ${frame}×${frame} px · sheet ${sheet.width}×${sheet.height} px`
+            : `${label}: ${frame}×${frame} px`
+        const framing = framed === 1 ? '' : `, framed ${trimmed(Number(framed.toFixed(2)))}× wide for its outer layers`
+        const canvasNote = format === 'png' ? ` on a ${recipe.canvas.width}×${recipe.canvas.height} canvas` : ''
+        $('export-size-detail').textContent = `${recipe.pixels} px planet${framing}, zoomed ${recipe.export.scale}× with hard pixel edges${canvasNote}.`
+        setHidden($('export-size-warning'), format !== 'png' || (frame <= recipe.canvas.width && frame <= recipe.canvas.height))
+    }
+
     // preflight already speaks plain English, so pass its sentence through rather than prefixing our own.
     const admissionMessage = (result: ReturnType<typeof preflightRenderRequest>): string =>
         result.reasons.find((reason) => reason.includes('memory')) ?? result.reasons[0] ?? ''
 
-    const updateAdmission = (candidateRecipe?: SceneRecipeV1): void => {
+    const updateAdmission = (candidateRecipe?: SceneRecipeV2): void => {
         let selectedReasons: readonly string[] = []
-        const recipe = candidateRecipe ?? recipeFromControls()
+        let recipe: SceneRecipeV2
+        try {
+            recipe = candidateRecipe ?? recipeFromControls()
+        } catch (error) {
+            admissionOutput.textContent = visitorMessage(error, 'Those settings do not work together. Try adjusting them.')
+            setHidden(admissionOutput, false)
+            download.disabled = true
+            return
+        }
         const currentLimits = limits()
         const framesInput = $<HTMLInputElement>('export-frames')
         let timingError = ''
@@ -250,6 +323,7 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
         }
         framesInput.setCustomValidity(timingError)
         if (timingError) selectedReasons = [timingError]
+        let sheet: { width: number, height: number } | undefined
         for (const option of Array.from(scaleSelect.options)) {
             const scale = Number(option.value) as ExportScale
             try {
@@ -260,33 +334,47 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
                 const dimension = widthLimited ? result.estimate.output.width : result.estimate.output.height
                 option.title = result.admitted ? '' : admissionMessage(result)
                 if (option.value === scaleSelect.value) {
-                    const selectedMessage = widthLimited || heightLimited
-                        ? `${option.text} would be ${dimension}px ${widthLimited ? 'wide' : 'high'} – this device tops out at ${currentLimits.maxTextureDimension2D}px.`
+                    sheet = result.estimate.output
+                    const selectedMessage = format !== 'png' && (widthLimited || heightLimited)
+                        ? `${option.text} would be ${dimension}px ${widthLimited ? 'wide' : 'high'}: this device tops out at ${currentLimits.maxTextureDimension2D}px.`
                         : option.title
                     selectedReasons = timingError ? [timingError, selectedMessage] : selectedMessage ? [selectedMessage] : []
                 }
-            } catch (error) {
+            } catch {
                 option.disabled = true
-                option.title = 'This scale is unavailable with the current settings.'
+                option.title = 'This zoom is unavailable with the current settings.'
                 if (option.value === scaleSelect.value) selectedReasons = timingError ? [timingError, option.title] : [option.title]
             }
         }
+        updateSizeReadout(recipe, sheet)
+        selectedReasons = selectedReasons.filter(Boolean)
         admissionOutput.textContent = selectedReasons[0] ?? ''
         setHidden(admissionOutput, selectedReasons.length === 0)
         download.disabled = selectedReasons.length > 0 || controller !== null
     }
 
-    const drawGuides = (context: CanvasRenderingContext2D, center: Vec2, size: number): void => {
+    // PNG previews its whole canvas; GIF and spritesheet preview exactly their square, always-centered frame.
+    const previewFrame = (recipe: SceneRecipeV2): { width: number, height: number, center: Vec2 } => {
+        if (format === 'png') return { width: recipe.canvas.width, height: recipe.canvas.height, center: recipe.body.center }
+        const size = bodyFrameSize(recipe.celestialType, recipe.pixels, recipe.export.scale)
+        return { width: size, height: size, center: [0.5, 0.5] }
+    }
+
+    const previewBodyPixels = (recipe: SceneRecipeV2): CanvasBody => {
+        const frame = previewFrame(recipe)
+        const size = bodyFrameSize(recipe.celestialType, recipe.pixels, recipe.export.scale) * canvas.width / frame.width
+        return composerBodyToCanvasPixels({ center: frame.center, light: recipe.body.light }, size, canvas.width, canvas.height)
+    }
+
+    const drawGuides = (context: CanvasRenderingContext2D, center: Vec2): void => {
         context.save()
         context.strokeStyle = 'rgba(129,140,248,.85)'
         context.lineWidth = 1
         context.setLineDash([5, 4])
-        const xs = [0, context.canvas.width / 2, context.canvas.width]
-        const ys = [0, context.canvas.height / 2, context.canvas.height]
-        if (xs.some((x) => Math.abs(center[0] - x) < 6 || Math.abs(center[0] - size / 2 - x) < 6 || Math.abs(center[0] + size / 2 - x) < 6)) {
+        if (Math.abs(center[0] - context.canvas.width / 2) < 1) {
             context.beginPath(); context.moveTo(context.canvas.width / 2, 0); context.lineTo(context.canvas.width / 2, context.canvas.height); context.stroke()
         }
-        if (ys.some((y) => Math.abs(center[1] - y) < 6 || Math.abs(center[1] - size / 2 - y) < 6 || Math.abs(center[1] + size / 2 - y) < 6)) {
+        if (Math.abs(center[1] - context.canvas.height / 2) < 1) {
             context.beginPath(); context.moveTo(0, context.canvas.height / 2); context.lineTo(context.canvas.width, context.canvas.height / 2); context.stroke()
         }
         context.restore()
@@ -295,7 +383,8 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
     // Fit the export frame inside the stage in JS: sizing the canvas from its own box would feed back on itself.
     const sizePreviewCanvas = (): void => {
         const stageBox = $('export-preview-stage').getBoundingClientRect()
-        const aspect = state.canvas.width / state.canvas.height
+        const frame = previewFrame(state)
+        const aspect = frame.width / frame.height
         let width = stageBox.width
         let height = width / aspect
         if (height > stageBox.height) {
@@ -306,17 +395,17 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
         canvas.style.blockSize = `${height}px`
         canvas.width = Math.max(1, Math.round(width))
         canvas.height = Math.max(1, Math.round(height))
-        previewDrop.refreshShape()
     }
 
-    const positionHandles = (recipe: SceneRecipeV1): void => {
-        const body = composerBodyToCanvasPixels(recipe.body, canvas.width, canvas.height)
+    const positionHandles = (recipe: SceneRecipeV2): void => {
+        const body = previewBodyPixels(recipe)
         const bounds = canvas.getBoundingClientRect()
         const scaleX = bounds.width / canvas.width
         const scaleY = bounds.height / canvas.height
         bodyHandle.style.left = `${canvas.offsetLeft + body.center[0] * scaleX}px`
         bodyHandle.style.top = `${canvas.offsetTop + body.center[1] * scaleY}px`
-        bodyHandle.style.setProperty('--export-body-handle-size', `${Math.min(36, body.size * Math.min(scaleX, scaleY) * 0.5)}px`)
+        bodyHandle.style.setProperty('--export-body-handle-size', `${Math.max(16, Math.min(36, body.size * Math.min(scaleX, scaleY) * 0.5))}px`)
+        bodyHandle.hidden = format !== 'png'
         lightHandle.hidden = body.light === null
         if (body.light) {
             lightHandle.style.left = `${canvas.offsetLeft + body.light[0] * scaleX}px`
@@ -324,43 +413,41 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
         }
     }
 
-    const resetHandleTransform = (handle: HTMLElement): void => {
-        handle.style.setProperty('--export-drag-x', '0px')
-        handle.style.setProperty('--export-drag-y', '0px')
-    }
-
-    const drawPreview = (recipe: SceneRecipeV1, positionOverlay = true): void => {
+    const drawPreview = (recipe: SceneRecipeV2): void => {
         const context = canvas.getContext('2d')
         if (!context) return
         context.imageSmoothingEnabled = false
-        const backdropKey = JSON.stringify([canvas.width, canvas.height, recipe.backdrop])
+        const shown = exportRecipe(recipe)
+        const frame = previewFrame(recipe)
+        // Star size and placement follow the raster's dimensions, so animated previews use the exporter's frame size.
+        const raster = format !== 'png' && frame.width <= FROZEN_BACKDROP_PREVIEW_LIMIT
+            ? { width: frame.width, height: frame.height }
+            : { width: canvas.width, height: canvas.height }
+        const backdropKey = JSON.stringify([raster.width, raster.height, shown.backdrop])
         if (backdropKey !== previewBackdropKey) {
-            previewBackdropCanvas = document.createElement('canvas')
-            previewBackdropCanvas.width = canvas.width
-            previewBackdropCanvas.height = canvas.height
-            const backdropContext = previewBackdropCanvas.getContext('2d')
+            const backdropCanvas = document.createElement('canvas')
+            backdropCanvas.width = raster.width
+            backdropCanvas.height = raster.height
+            previewBackdropCanvas = null
+            previewBackdropKey = backdropKey
+            const backdropContext = backdropCanvas.getContext('2d')
             if (backdropContext) {
-                void previewBackdrop(backdropContext, recipe).then(() => {
-                    if (previewBackdropKey === backdropKey && !workspace.hidden) drawPreview(recipe)
+                void previewBackdrop(backdropContext, shown).then(() => {
+                    if (previewBackdropKey !== backdropKey || workspace.hidden) return
+                    previewBackdropCanvas = backdropCanvas
+                    drawPreview(state)
                 }).catch(() => {
                     if (previewBackdropKey !== backdropKey || workspace.hidden) return
-                    previewBackdropCanvas = null
-                    errorOutput.textContent = 'The preview background could not load. Check your connection, then try again.'
-                    setHidden(errorOutput, false)
+                    showError('The preview background could not load. Check your connection, then try again.', 'preview')
                 })
             }
-            previewBackdropKey = backdropKey
         }
         context.clearRect(0, 0, canvas.width, canvas.height)
-        if (previewBackdropCanvas) context.drawImage(previewBackdropCanvas, 0, 0)
-        const body = composerBodyToCanvasPixels(recipe.body, canvas.width, canvas.height)
+        if (previewBackdropCanvas) context.drawImage(previewBackdropCanvas, 0, 0, canvas.width, canvas.height)
+        const body = previewBodyPixels(recipe)
         if (previewBody) context.drawImage(previewBody, body.center[0] - body.size / 2, body.center[1] - body.size / 2, body.size, body.size)
-        drawGuides(context, body.center, body.size)
-        if (body.light) {
-            context.fillStyle = '#facc15'
-            context.beginPath(); context.arc(body.light[0], body.light[1], 5, 0, Math.PI * 2); context.fill()
-        }
-        if (positionOverlay) positionHandles(recipe)
+        if (format === 'png') drawGuides(context, body.center)
+        positionHandles(recipe)
     }
 
     const renderPreview = async (): Promise<void> => {
@@ -369,39 +456,40 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
         previewController?.abort(new DOMException('The preview was superseded.', 'AbortError'))
         const previewAbort = new AbortController()
         previewController = previewAbort
-        let recipe: SceneRecipeV1
+        let recipe: SceneRecipeV2
         try {
             recipe = recipeFromControls()
             state = recipe
             options.onRecipeChange(recipe)
             updateAdmission(recipe)
         } catch (error) {
-            errorOutput.textContent = visitorMessage(error, 'Those settings do not work together. Try adjusting them.')
-            setHidden(errorOutput, false)
+            showError(visitorMessage(error, 'Those settings do not work together. Try adjusting them.'), 'preview')
             download.disabled = true
             return
         }
-        setHidden(errorOutput, true)
+        clearError('preview')
         sizePreviewCanvas()
         try {
             const structure = JSON.stringify({
-                backend: options.backend(),
+                // A new device generation (after a loss) needs a new session; the old one's GPU resources are gone.
+                generation: options.gpu.current().generation,
                 celestialType: recipe.celestialType, seed: recipe.seed, pixels: recipe.pixels,
                 palette: recipe.palette, layers: recipe.layers, dither: recipe.dither,
             })
             if (structure !== previewStructure) {
                 previewSession?.dispose()
                 previewSession = null
+                previewBody = null
                 previewStructure = structure
             }
             if (!previewSession) {
                 if (previewAbort.signal.aborted || generation !== previewGeneration) return
-                previewSession = await createExportSession(recipe, options.backend(), { signal: previewAbort.signal })
+                const session = await createExportSession(recipe, options.gpu, { signal: previewAbort.signal })
                 if (previewAbort.signal.aborted || generation !== previewGeneration) {
-                    previewSession.dispose()
-                    previewSession = null
+                    session.dispose()
                     return
                 }
+                previewSession = session
             }
             Object.assign(previewSession.recipe.body, recipe.body)
             const frame = await previewSession.renderFrame(recipe.body.phase, {
@@ -409,11 +497,11 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
             })
             if (previewAbort.signal.aborted || generation !== previewGeneration) return
             previewBody = frameCanvas(frame)
-            drawPreview(recipe)
+            drawPreview(drag ? state : recipe)
         } catch (error) {
             if (!previewAbort.signal.aborted && generation === previewGeneration) {
-                errorOutput.textContent = visitorMessage(error, 'The preview could not be drawn. Try different settings.')
-                setHidden(errorOutput, false)
+                console.error('Export preview failed.', error)
+                showError(visitorMessage(error, 'The preview could not be drawn. Try different settings.'), 'preview')
             }
         }
     }
@@ -439,6 +527,9 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
         for (const button of formatButtons) button.setAttribute('aria-pressed', String(button.dataset.exportFormat === format))
         state = validateSceneRecipe(options.currentRecipe())
         changedSinceOpen = false
+        statusOutput.textContent = ''
+        errorSource = null
+        setHidden(errorOutput, true)
         syncControls()
         setHidden(workspace, false)
         setHidden(form, false)
@@ -446,27 +537,53 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
         setHidden($('export-animated-controls'), format === 'png')
         setHidden($('export-gif-controls'), format !== 'gif')
         setHidden($('export-spritesheet-controls'), format !== 'spritesheet')
+        // Animated frames are always centered, so only the PNG composer offers a planet handle.
+        setHidden(bodyHandle, format !== 'png')
+        updateBackdropVisibility()
         $('export-title').textContent = format === 'png' ? 'PNG Export Editor' : format === 'gif' ? 'Animated GIF' : 'Spritesheet'
         download.textContent = format === 'png' ? 'Download PNG' : format === 'gif' ? 'Download GIF' : 'Download Spritesheet'
         options.stage.classList.add('export-active')
         panel.classList.add('export-active')
-        updateLoopWarning()
+        updateAdmission()
         schedulePreview()
+    }
+
+    // Commits a recipe the handles or keyboard produced, without re-rendering unless lighting changed.
+    const commitBody = (recipe: SceneRecipeV2, relight: boolean): void => {
+        changedSinceOpen = true
+        state = recipe
+        syncBodyFields(recipe)
+        options.onRecipeChange(recipe)
+        drawPreview(recipe)
+        if (relight) schedulePreview()
     }
 
     form.addEventListener('input', (event) => {
         changedSinceOpen = true
         updateLoopWarning()
+        updateBackdropVisibility()
         updateAdmission()
         const target = event.target as HTMLElement
-        if (!['export-phase', 'export-preview-phase'].includes(target.id) && previewBody) {
+        if (['export-phase', 'export-preview-phase', 'export-pixels'].includes(target.id) || !previewBody) {
+            schedulePreview()
+            return
+        }
+        try {
             state = recipeFromControls()
-            options.onRecipeChange(state)
-            if (target.id === 'export-width' || target.id === 'export-height') sizePreviewCanvas()
-            drawPreview(state)
-        } else schedulePreview()
+        } catch {
+            return
+        }
+        options.onRecipeChange(state)
+        if (target.id === 'export-width' || target.id === 'export-height') sizePreviewCanvas()
+        drawPreview(state)
     })
-    form.addEventListener('change', () => { updateAdmission() })
+    form.addEventListener('change', (event) => {
+        if ((event.target as HTMLElement).id === 'export-pixels') {
+            pixelsInput.value = String(options.setPixels(Number(pixelsInput.value)))
+            schedulePreview()
+        }
+        updateAdmission()
+    })
     form.addEventListener('submit', (event) => {
         event.preventDefault()
         if (controller) return
@@ -476,18 +593,14 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
             download.disabled = true
             setHidden(cancel, false)
             setHidden(progressWrap, false)
-            setHidden(errorOutput, true)
+            clearError('export')
             statusOutput.textContent = 'Preparing export…'
             try {
                 const exportFormat = selectedExportFormat()
-                const recipe = recipeFromControls()
-                const request = requestFor(exportFormat, recipe)
-                const extension = exportFormat === 'png' ? 'png' : exportFormat === 'gif' ? 'gif' : 'zip'
-                const mediaType = extension === 'png' ? 'image/png' : extension === 'gif' ? 'image/gif' : 'application/zip'
-                const baseName = exportFormat === 'png' ? `${recipe.celestialType}-${recipe.seed}`
-                    : exportFormat === 'scene-package' ? `${recipe.celestialType}-scene`
-                        : `${recipe.celestialType}-${recipe.seed}`
-                const saveTarget = await acquireExportSaveTarget(`${baseName}.${extension}`, mediaType)
+                const request = requestFor(exportFormat, recipeFromControls())
+                const extension = exportExtension(exportFormat, request.includeMetadata)
+                const saveTarget = await acquireExportSaveTarget(
+                    exportFilename(request.recipe, exportFormat, request.includeMetadata), exportMediaType(extension))
                 if (activeController.signal.aborted) throw activeController.signal.reason
                 const runners: Record<ExportFormat, ExportRunner> = {
                     png: exportCompositePng,
@@ -497,18 +610,19 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
                     'png-sequence': exportPngSequence,
                 }
                 const runOptions: AnimatedExportRunOptions = {
-                    backend: options.backend(), signal: activeController.signal, onProgress: setProgress,
+                    gpu: options.gpu, signal: activeController.signal, onProgress: setProgress,
                     oneBitTransparency: $<HTMLInputElement>('export-gif-transparency').checked,
                     preflightLimits: limits(),
                 }
                 const output = await runners[exportFormat](request, runOptions)
                 for (const file of output.files) await saveExportFile(file, { signal: activeController.signal }, saveTarget)
-                statusOutput.textContent = output.warnings.length ? output.warnings.join(' ') : 'Export saved.'
+                statusOutput.textContent = output.warnings.length ? output.warnings.join(' ') : `Saved ${output.files.map((file) => file.filename).join(', ')}.`
             } catch (error) {
                 if (error instanceof DOMException && error.name === 'AbortError') statusOutput.textContent = 'Export canceled.'
                 else {
-                    errorOutput.textContent = visitorMessage(error, 'Something went wrong during export. Try again, or try a smaller size.')
-                    setHidden(errorOutput, false)
+                    statusOutput.textContent = ''
+                    console.error('Export failed.', error)
+                    showError(visitorMessage(error, 'Something went wrong during export. Try again, or try a smaller size.'), 'export')
                 }
             } finally {
                 if (controller === activeController) controller = null
@@ -520,7 +634,13 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
     })
     cancel.addEventListener('click', () => { controller?.abort(new DOMException('The export was canceled.', 'AbortError')) })
     $('export-close').addEventListener('click', () => {
-        const closingRecipe = recipeFromControls()
+        let closingRecipe = state
+        try {
+            closingRecipe = recipeFromControls()
+        } catch {
+            // Invalid fields fall back to the last recipe that validated.
+        }
+        cancelDrag()
         controller?.abort(new DOMException('The export was canceled.', 'AbortError'))
         previewController?.abort(new DOMException('The preview was closed.', 'AbortError'))
         previewController = null
@@ -534,6 +654,7 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
         setHidden(form, true)
         options.stage.classList.remove('export-active')
         panel.classList.remove('export-active')
+        state = closingRecipe
         options.onClose(closingRecipe, changedSinceOpen)
     })
     $('export-background-reroll').addEventListener('click', () => {
@@ -557,135 +678,153 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
         }
         schedulePreview()
     })
+    $('export-fit-canvas').addEventListener('click', () => {
+        changedSinceOpen = true
+        let recipe: SceneRecipeV2
+        try {
+            recipe = recipeFromControls()
+        } catch {
+            return
+        }
+        const frame = String(bodyFrameSize(recipe.celestialType, recipe.pixels, recipe.export.scale))
+        $<HTMLInputElement>('export-width').value = frame
+        $<HTMLInputElement>('export-height').value = frame
+        $<HTMLInputElement>('export-body-x').value = '0.5'
+        $<HTMLInputElement>('export-body-y').value = '0.5'
+        $<HTMLSelectElement>('export-size-preset').value = 'custom'
+        schedulePreview()
+    })
 
-    const dragBodyAt = (event: Pick<DragMoveEvent, 'operation'>): ReturnType<typeof composerBodyToCanvasPixels> | null => {
-        if (!dragStartBody || !dragRecipe || !event.operation.source) return null
+    // Plain Pointer Events with capture: handles live in canvas space, so no drag-and-drop layer is needed.
+    const recipeAt = (event: PointerEvent): SceneRecipeV2 | null => {
+        if (!drag) return null
         const bounds = canvas.getBoundingClientRect()
         const delta: Vec2 = [
-            event.operation.transform.x * canvas.width / bounds.width,
-            event.operation.transform.y * canvas.height / bounds.height,
+            (event.clientX - drag.startClient[0]) * canvas.width / bounds.width,
+            (event.clientY - drag.startClient[1]) * canvas.height / bounds.height,
         ]
-        if (event.operation.source.id === 'export-body-drag') {
-            return {
-                ...dragStartBody,
-                center: [dragStartBody.center[0] + delta[0], dragStartBody.center[1] + delta[1]],
-                light: dragStartBody.light
-                    ? [dragStartBody.light[0] + delta[0], dragStartBody.light[1] + delta[1]]
-                    : null,
+        const start = drag.startBody
+        let moved: CanvasBody
+        if (drag.kind === 'body') {
+            const center: [number, number] = [start.center[0] + delta[0], start.center[1] + delta[1]]
+            if (!event.altKey) {
+                if (Math.abs(center[0] - canvas.width / 2) < SNAP_DISTANCE) center[0] = canvas.width / 2
+                if (Math.abs(center[1] - canvas.height / 2) < SNAP_DISTANCE) center[1] = canvas.height / 2
             }
-        }
-        return {
-            ...dragStartBody,
-            light: dragStartBody.light
-                ? [dragStartBody.light[0] + delta[0], dragStartBody.light[1] + delta[1]]
-                : null,
-        }
-    }
-
-    dragManager.monitor.addEventListener('dragstart', (event) => {
-        if (!event.operation.source) return
-        dragRecipe = recipeFromControls()
-        dragStartBody = composerBodyToCanvasPixels(dragRecipe.body, canvas.width, canvas.height)
-    })
-    dragManager.monitor.addEventListener('dragmove', (event) => {
-        const body = dragBodyAt(event)
-        if (!body || !dragRecipe || !event.operation.source) return
-        const bounds = canvas.getBoundingClientRect()
-        const sourceIsBody = event.operation.source.id === 'export-body-drag'
-        const handle = sourceIsBody ? bodyHandle : lightHandle
-        if (sourceIsBody && !lightHandle.hidden) {
-            lightHandle.style.setProperty('--export-drag-x', `${event.operation.transform.x}px`)
-            lightHandle.style.setProperty('--export-drag-y', `${event.operation.transform.y}px`)
-        }
-        const normalized = canvasPixelsToComposerBody(body, canvas.width, canvas.height)
-        if (!sourceIsBody && normalized.light) normalized.light = clampBodyLocalLight(normalized.light)
-        const previewBodyPixels = composerBodyToCanvasPixels(normalized, canvas.width, canvas.height)
-        const dragX = sourceIsBody ? event.operation.transform.x
-            : (previewBodyPixels.light![0] - dragStartBody!.light![0]) * bounds.width / canvas.width
-        const dragY = sourceIsBody ? event.operation.transform.y
-            : (previewBodyPixels.light![1] - dragStartBody!.light![1]) * bounds.height / canvas.height
-        handle.style.setProperty('--export-drag-x', `${dragX}px`)
-        handle.style.setProperty('--export-drag-y', `${dragY}px`)
-        drawPreview({ ...dragRecipe, body: { ...dragRecipe.body, ...normalized } }, false)
-    })
-    dragManager.monitor.addEventListener('dragend', (event) => {
-        const body = dragBodyAt(event)
-        resetHandleTransform(bodyHandle)
-        resetHandleTransform(lightHandle)
-        if (!event.canceled && body && dragRecipe) {
-            changedSinceOpen = true
-            const normalized = canvasPixelsToComposerBody(body, canvas.width, canvas.height)
-            if (event.operation.source?.id === 'export-light-drag' && normalized.light) {
-                normalized.light = clampBodyLocalLight(normalized.light)
-            }
-            $<HTMLInputElement>('export-body-x').value = normalized.center[0].toFixed(4)
-            $<HTMLInputElement>('export-body-y').value = normalized.center[1].toFixed(4)
-            state = { ...dragRecipe, body: { ...dragRecipe.body, ...normalized } }
-            options.onRecipeChange(state)
-            positionHandles(state)
-            schedulePreview()
+            const shift: Vec2 = [center[0] - start.center[0], center[1] - start.center[1]]
+            moved = { ...start, center, light: start.light && [start.light[0] + shift[0], start.light[1] + shift[1]] }
         } else {
-            drawPreview(recipeFromControls())
+            if (!start.light) return null
+            moved = { ...start, light: [start.light[0] + delta[0], start.light[1] + delta[1]] }
         }
-        dragStartBody = null
-        dragRecipe = null
-    })
+        const normalized = canvasPixelsToComposerBody(moved, canvas.width, canvas.height)
+        return {
+            ...drag.startRecipe,
+            body: {
+                ...drag.startRecipe.body,
+                center: drag.kind === 'body' ? normalized.center : drag.startRecipe.body.center,
+                light: normalized.light && (drag.kind === 'light' ? clampBodyLocalLight(normalized.light) : normalized.light),
+            },
+        }
+    }
 
-    let resizing = false
-    const pointerPosition = (event: PointerEvent): Vec2 => {
-        const bounds = canvas.getBoundingClientRect()
-        return [(event.clientX - bounds.left) * canvas.width / bounds.width, (event.clientY - bounds.top) * canvas.height / bounds.height]
-    }
-    canvas.addEventListener('pointerdown', (event) => {
-        const body = composerBodyToCanvasPixels(recipeFromControls().body, canvas.width, canvas.height)
-        const point = pointerPosition(event)
-        const bodyDistance = Math.hypot(point[0] - body.center[0], point[1] - body.center[1])
-        resizing = Math.abs(bodyDistance - body.size / 2) < 14
-        if (resizing) canvas.setPointerCapture(event.pointerId)
-    })
-    canvas.addEventListener('pointermove', (event) => {
-        if (!resizing) return
-        changedSinceOpen = true
-        const recipe = recipeFromControls()
-        const body = composerBodyToCanvasPixels(recipe.body, canvas.width, canvas.height)
-        const point = pointerPosition(event)
-        let size = Math.max(1, Math.hypot(point[0] - body.center[0], point[1] - body.center[1]) * 2)
-        if ($<HTMLInputElement>('export-snap').checked && !event.altKey) {
-            const logical = Math.max(1, Math.round(recipe.pixels * PLANETS[recipe.celestialType].relativeScale))
-            const exportSize = size * Math.min(recipe.canvas.width, recipe.canvas.height) / Math.min(canvas.width, canvas.height)
-            size = snapBodySizeToIntegerScale(exportSize, logical).size * Math.min(canvas.width, canvas.height)
-                / Math.min(recipe.canvas.width, recipe.canvas.height)
+    const startDrag = (kind: DragKind, event: PointerEvent, target: HTMLElement): void => {
+        if (event.button !== 0 || drag || workspace.hidden || (kind === 'body' && format !== 'png')) return
+        let recipe: SceneRecipeV2
+        try {
+            recipe = recipeFromControls()
+        } catch {
+            return
         }
-        body.size = size
-        const normalized = canvasPixelsToComposerBody(body, canvas.width, canvas.height)
-        $<HTMLInputElement>('export-body-x').value = normalized.center[0].toFixed(4)
-        $<HTMLInputElement>('export-body-y').value = normalized.center[1].toFixed(4)
-        $<HTMLInputElement>('export-body-scale').value = normalized.size.toFixed(4)
-        state = { ...recipe, body: { ...recipe.body, center: normalized.center, size: normalized.size, light: normalized.light } }
-        options.onRecipeChange(state)
-        drawPreview(state)
-    })
-    const endDrag = (): void => {
-        if (!resizing) return
-        resizing = false
-        schedulePreview()
+        const startBody = previewBodyPixels(recipe)
+        if (kind === 'light' && !startBody.light) return
+        event.preventDefault()
+        target.setPointerCapture(event.pointerId)
+        drag = { kind, pointerId: event.pointerId, target, startClient: [event.clientX, event.clientY], startBody, startRecipe: recipe, moved: false }
     }
-    canvas.addEventListener('pointerup', endDrag)
-    canvas.addEventListener('pointercancel', endDrag)
-    canvas.addEventListener('keydown', (event) => {
+
+    const moveDrag = (event: PointerEvent): void => {
+        if (!drag || event.pointerId !== drag.pointerId) return
+        const recipe = recipeAt(event)
+        if (!recipe) return
+        drag.moved = true
+        state = recipe
+        syncBodyFields(recipe)
+        drawPreview(recipe)
+        if (drag.kind === 'light') schedulePreview()
+    }
+
+    const endDrag = (event: PointerEvent): void => {
+        if (!drag || event.pointerId !== drag.pointerId) return
+        const finished = drag
+        // Lost capture carries no trustworthy position, so keep the last moved recipe instead.
+        const recipe = event.type === 'lostpointercapture' ? state : recipeAt(event) ?? state
+        drag = null
+        if (finished.target.hasPointerCapture(event.pointerId)) finished.target.releasePointerCapture(event.pointerId)
+        if (finished.moved) commitBody(recipe, finished.kind === 'light')
+    }
+
+    function cancelDrag(): void {
+        if (!drag) return
+        const finished = drag
+        drag = null
+        if (finished.target.hasPointerCapture(finished.pointerId)) finished.target.releasePointerCapture(finished.pointerId)
+        state = finished.startRecipe
+        syncBodyFields(state)
+        if (!workspace.hidden) drawPreview(state)
+    }
+
+    bodyHandle.addEventListener('pointerdown', (event) => { startDrag('body', event, bodyHandle) })
+    lightHandle.addEventListener('pointerdown', (event) => { startDrag('light', event, lightHandle) })
+    canvas.addEventListener('pointerdown', (event) => {
+        let recipe: SceneRecipeV2
+        try {
+            recipe = recipeFromControls()
+        } catch {
+            return
+        }
+        const body = previewBodyPixels(recipe)
+        const bounds = canvas.getBoundingClientRect()
+        const point: Vec2 = [(event.clientX - bounds.left) * canvas.width / bounds.width, (event.clientY - bounds.top) * canvas.height / bounds.height]
+        if (Math.abs(point[0] - body.center[0]) <= body.size / 2 && Math.abs(point[1] - body.center[1]) <= body.size / 2) {
+            startDrag('body', event, canvas)
+        }
+    })
+    for (const target of [bodyHandle, lightHandle, canvas] as HTMLElement[]) {
+        target.addEventListener('pointermove', moveDrag)
+        target.addEventListener('pointerup', endDrag)
+        target.addEventListener('pointercancel', cancelDrag)
+        target.addEventListener('lostpointercapture', endDrag)
+    }
+
+    const nudge = (event: KeyboardEvent, kind: DragKind): void => {
         const deltas: Partial<Record<string, Vec2>> = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }
         const delta = deltas[event.key]
-        if (!delta) return
-        changedSinceOpen = true
+        if (!delta || drag || (kind === 'body' && format !== 'png')) return
         event.preventDefault()
-        const multiplier = event.shiftKey ? 10 : 1
-        const center = nudgeNormalizedCenter(recipeFromControls().body.center, state.canvas.width, state.canvas.height, delta[0] * multiplier, delta[1] * multiplier)
-        $<HTMLInputElement>('export-body-x').value = center[0].toFixed(4)
-        $<HTMLInputElement>('export-body-y').value = center[1].toFixed(4)
-        schedulePreview()
-    })
+        let recipe: SceneRecipeV2
+        try {
+            recipe = recipeFromControls()
+        } catch {
+            return
+        }
+        const step = event.shiftKey ? 10 : 1
+        if (kind === 'body') {
+            const center = nudgeNormalizedCenter(recipe.body.center, recipe.canvas.width, recipe.canvas.height, delta[0] * step, delta[1] * step)
+            commitBody({ ...recipe, body: { ...recipe.body, center } }, false)
+            return
+        }
+        if (!recipe.body.light) return
+        // One press moves the light one output pixel, which in body-local units is 1/frame size.
+        const frame = bodyFrameSize(recipe.celestialType, recipe.pixels, recipe.export.scale)
+        const light = clampBodyLocalLight([recipe.body.light[0] + delta[0] * step / frame, recipe.body.light[1] + delta[1] * step / frame])
+        commitBody({ ...recipe, body: { ...recipe.body, light } }, true)
+    }
+    canvas.addEventListener('keydown', (event) => { nudge(event, 'body') })
+    bodyHandle.addEventListener('keydown', (event) => { nudge(event, 'body') })
+    lightHandle.addEventListener('keydown', (event) => { nudge(event, 'light') })
 
-    const replaceRecipe = (recipe: SceneRecipeV1): void => {
+    const replaceRecipe = (recipe: SceneRecipeV2): void => {
         state = validateSceneRecipe(recipe)
         syncControls()
         if (!workspace.hidden) schedulePreview()
@@ -701,5 +840,17 @@ export const createSceneComposer = (options: ComposerOptions): SceneComposer => 
         drawPreview(state)
     }).observe(workspace)
 
-    return { open, recipe: () => workspace.hidden ? state : recipeFromControls(), replaceRecipe, refreshFromLive }
+    return {
+        open,
+        recipe: () => {
+            if (workspace.hidden) return state
+            try {
+                return recipeFromControls()
+            } catch {
+                return state
+            }
+        },
+        replaceRecipe,
+        refreshFromLive,
+    }
 }

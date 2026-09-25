@@ -100,8 +100,8 @@ export const makeCircleNoise = (spec: NoiseSpec) => {
     })
 }
 
-/* The signature checker dither, on integer texel indices (Godot's raw-x form beats against
-   the fragment grid); undersampled texels fall back to fragment parity so it never moirés. */
+/* The signature checker on integer texel indices (Godot's raw-x form beats the fragment grid); undersampled
+   texels fall back to fragment parity, body-local because every body renders to its own target, live or export. */
 export const ditherCheck = Fn(([_uvPixel, uvReal, pixels]: [NV2, NV2, NF]) => {
     const texelsPerFrag = abs(dFdx(uvReal.x)).mul(pixels)
     const texelIndex = floor(uvReal.mul(pixels))

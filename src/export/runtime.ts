@@ -5,21 +5,20 @@ import {
     RenderTarget,
     Scene,
     Vector2,
-    WebGPURenderer,
+    type WebGPURenderer,
 } from 'three/webgpu'
+import { GpuLostError, type GpuBackend, type GpuHost } from '../gpu'
 import { Color } from '../palette'
 import { PLANET_FACTORIES, createPlanet, type PlanetRuntime } from '../tsl/registry'
 import { PLANETS } from '../tsl/values'
-import type { RenderProgress, SceneRecipeV1 } from './types'
+import { bodyFrameExtent, bodyLocalToLightUv, canonicalFrameSize } from './layout'
+import { abortable, submitWhilePending } from './serialQueue'
+import type { RenderProgress, SceneRecipeV2 } from './types'
 
-export type ExportBackend = 'webgpu' | 'webgl'
+export { bodyLocalToLightUv, lightUvToBodyLocal } from './layout'
+
+export type ExportBackend = GpuBackend
 export type RenderProgressListener = (progress: RenderProgress) => void
-
-export const bodyLocalToLightUv = (local: readonly [number, number]): [number, number] =>
-    [local[0] + 0.5, local[1] + 0.5]
-
-export const lightUvToBodyLocal = (uv: readonly [number, number]): [number, number] =>
-    [uv[0] - 0.5, uv[1] - 0.5]
 
 const exportRenderError = (details: string): Error => Object.assign(
     new Error('Something went wrong while rendering the export.'),
@@ -39,8 +38,9 @@ export interface RenderFrameOptions {
 }
 
 export interface ExportSession {
-    readonly recipe: SceneRecipeV1
+    readonly recipe: SceneRecipeV2
     readonly backend: ExportBackend
+    readonly generation: number
     readonly width: number
     readonly height: number
     renderFrame: (phase: number, options: RenderFrameOptions) => Promise<ExportFrame>
@@ -51,16 +51,6 @@ export interface ExportSession {
 
 export interface CreateExportSessionOptions {
     signal?: AbortSignal
-    canvas?: HTMLCanvasElement | OffscreenCanvas
-}
-
-export interface SharedRendererExportLease {
-    readonly renderer: WebGPURenderer
-    release: () => void
-}
-
-export interface SharedRendererExportLock {
-    acquire: (signal?: AbortSignal) => Promise<SharedRendererExportLease>
 }
 
 const throwIfAborted = (signal?: AbortSignal): void => {
@@ -77,7 +67,7 @@ const disposeRuntime = (runtime: PlanetRuntime): void => {
     runtime.group.removeFromParent()
 }
 
-const applyRecipe = (runtime: PlanetRuntime, recipe: SceneRecipeV1): void => {
+const applyRecipe = (runtime: PlanetRuntime, recipe: SceneRecipeV2): void => {
     runtime.pixels.value = recipe.pixels
     runtime.rotation.value = recipe.body.rotation
     runtime.setDither(recipe.dither)
@@ -126,25 +116,28 @@ const straightenReadback = (
     return output
 }
 
-const defaultCanvas = (): HTMLCanvasElement | OffscreenCanvas => {
-    if (typeof OffscreenCanvas !== 'undefined') return new OffscreenCanvas(1, 1)
-    if (typeof document !== 'undefined') return document.createElement('canvas')
-    throw new Error('A canvas is required when no browser canvas implementation is available.')
+/* Firefox only notices finished GPU work on a 100 ms timer unless something is submitted (Bugzilla 1870699),
+   and the live loop is frozen during exports, so empty submits keep readbacks from idling on that timer. */
+const nudgeWhilePending = (renderer: WebGPURenderer, pending: Promise<unknown>, lost: AbortSignal): void => {
+    const device = (renderer.backend as unknown as { device?: { queue: { submit: (buffers: []) => void } } }).device
+    if (device) submitWhilePending(() => { device.queue.submit([]) }, pending, lost, 5)
 }
 
 export const createExportSession = async (
-    recipe: SceneRecipeV1,
-    backend: ExportBackend,
+    recipe: SceneRecipeV2,
+    gpu: GpuHost,
     options: CreateExportSessionOptions = {},
 ): Promise<ExportSession> => {
     throwIfAborted(options.signal)
     const planetName = PLANETS[recipe.celestialType].name
     const factory = PLANET_FACTORIES.find((entry) => entry.metadata.name === planetName)
     if (!factory) throw new Error(`unknown celestial body: ${recipe.celestialType}`)
-    const width = Math.max(1, Math.round(recipe.pixels * factory.metadata.relativeScale))
+    // Bound to one device generation: after a loss its GPU resources are gone, so it fails instead of limping on.
+    const context = gpu.current()
+    throwIfAborted(context.lost)
+    const width = canonicalFrameSize(recipe.celestialType, recipe.pixels)
     const height = width
     let runtime: PlanetRuntime | undefined
-    let renderer: WebGPURenderer | undefined
     let target: RenderTarget | undefined
 
     try {
@@ -154,54 +147,43 @@ export const createExportSession = async (
         const scene = new Scene()
         const camera = new PerspectiveCamera(75, 1, 0.1, 100000)
         camera.position.z = 1
-        const largestLayer = Math.max(...runtime.metadata.layers.map((layer) => layer.quadScale))
         const cameraHeight = 2 * Math.tan((camera.fov * Math.PI) / 360)
-        runtime.group.scale.setScalar(cameraHeight / largestLayer)
+        runtime.group.scale.setScalar(cameraHeight / bodyFrameExtent(runtime.metadata, recipe.pixels))
         scene.add(runtime.group)
-
-        renderer = new WebGPURenderer({
-            antialias: false,
-            alpha: true,
-            canvas: options.canvas ?? defaultCanvas(),
-            forceWebGL: backend === 'webgl',
-        })
-        renderer.outputColorSpace = LinearSRGBColorSpace
-        renderer.setPixelRatio(1)
-        renderer.setSize(width, height, false)
-        renderer.setClearColor(0x000000, 0)
-        await renderer.init()
-        throwIfAborted(options.signal)
-
-        const actualBackend = renderer.backend as unknown as { isWebGPUBackend?: boolean, isWebGLBackend?: boolean }
-        if (backend === 'webgpu' && !actualBackend.isWebGPUBackend) {
-            throw exportRenderError('WebGPU export was requested, but Three initialized its WebGL fallback.')
-        }
-        if (backend === 'webgl' && !actualBackend.isWebGLBackend) {
-            throw exportRenderError('WebGL export was requested, but Three did not initialize its WebGL backend.')
-        }
 
         target = new RenderTarget(width, height, { depthBuffer: false, stencilBuffer: false })
         target.texture.colorSpace = LinearSRGBColorSpace
         let disposed = false
+        let disposeRequested = false
+        const disposedError = (): Error => new Error('The export session has been disposed.')
+        const lostError = (): unknown => context.lost.reason ?? new GpuLostError()
 
-        const dispose = (): void => {
+        // Frees only what this session owns; the shared renderer outlives every export.
+        const destroy = (): void => {
             if (disposed) return
             disposed = true
             target?.dispose()
             disposeRuntime(runtime!)
-            renderer?.dispose()
             target = undefined
             runtime = undefined
-            renderer = undefined
+        }
+
+        // Deferred while live: three's readback keeps using the target after a canceled caller stops waiting.
+        const dispose = (): void => {
+            if (disposeRequested) return
+            disposeRequested = true
+            if (context.lost.aborted) destroy()
+            else void context.queue.idle().then(destroy)
         }
 
         return {
             recipe,
-            backend,
+            backend: context.backend,
+            generation: context.generation,
             width,
             height,
             setIsolatedLayer: (layerId) => {
-                if (disposed) throw new Error('The export session has been disposed.')
+                if (disposeRequested) throw disposedError()
                 const index = layerId === null
                     ? -1
                     : runtime!.metadata.layers.findIndex((layer) => layer.node === layerId)
@@ -216,42 +198,56 @@ export const createExportSession = async (
                     && runtime!.group.children[index] !== undefined)
                 .map((layer) => layer.node),
             renderFrame: async (phase, frameOptions) => {
-                if (disposed) throw new Error('The export session has been disposed.')
+                if (disposeRequested) throw disposedError()
                 throwIfAborted(frameOptions.signal)
-                frameOptions.onProgress?.({ requestId: frameOptions.requestId, stage: 'render', completed: 0, total: 1 })
-
-                const activeRuntime = runtime!
-                activeRuntime.rotation.value = 0
-                activeRuntime.setExportPhase(phase)
-                activeRuntime.rotation.value += recipe.body.rotation
-                // Reapplied per frame: the preview session mutates recipe.body between renders.
-                if (recipe.body.light && activeRuntime.lightOrigin) {
-                    activeRuntime.lightOrigin.value.set(...bodyLocalToLightUv(recipe.body.light))
-                }
-                renderer!.setRenderTarget(target!)
+                if (context.lost.aborted || gpu.current() !== context) throw lostError()
+                const release = await abortable(context.queue.acquire(frameOptions.signal), context.lost)
+                let readbackWork: Promise<unknown> | null = null
                 try {
-                    renderer!.clear()
-                    renderer!.render(scene, camera)
-                } finally {
-                    renderer!.setRenderTarget(null)
-                }
-                throwIfAborted(frameOptions.signal)
+                    if (disposeRequested) throw disposedError()
+                    throwIfAborted(frameOptions.signal)
+                    throwIfAborted(context.lost)
+                    frameOptions.onProgress?.({ requestId: frameOptions.requestId, stage: 'render', completed: 0, total: 1 })
 
-                const readback = await renderer!.readRenderTargetPixelsAsync(target!, 0, 0, width, height)
-                throwIfAborted(frameOptions.signal)
-                if (!(readback instanceof Uint8Array)) {
-                    throw exportRenderError(`Expected RGBA8 readback, received ${readback.constructor.name}.`)
+                    const activeRuntime = runtime!
+                    activeRuntime.rotation.value = 0
+                    activeRuntime.setExportPhase(phase)
+                    activeRuntime.rotation.value += recipe.body.rotation
+                    // Reapplied per frame: the preview session mutates recipe.body between renders.
+                    if (recipe.body.light && activeRuntime.lightOrigin) {
+                        activeRuntime.lightOrigin.value.set(...bodyLocalToLightUv(recipe.body.light))
+                    }
+                    const { renderer } = context
+                    // Each pass sets its own state; the live loop skips its frames while this slot is held.
+                    renderer.setClearColor(0x000000, 0)
+                    renderer.setRenderTarget(target!)
+                    try {
+                        renderer.clear()
+                        renderer.render(scene, camera)
+                    } finally {
+                        renderer.setRenderTarget(null)
+                    }
+                    const pending = renderer.readRenderTargetPixelsAsync(target!, 0, 0, width, height)
+                    readbackWork = pending
+                    void pending.then(release, release)
+                    nudgeWhilePending(renderer, pending, context.lost)
+                    const readback = await abortable(abortable(pending, frameOptions.signal), context.lost)
+                    throwIfAborted(frameOptions.signal)
+                    if (!(readback instanceof Uint8Array)) {
+                        throw exportRenderError(`Expected RGBA8 readback, received ${readback.constructor.name}.`)
+                    }
+                    const pixels = straightenReadback(readback, width, height, context.backend === 'webgl')
+                    frameOptions.onProgress?.({ requestId: frameOptions.requestId, stage: 'render', completed: 1, total: 1 })
+                    return { width, height, pixels }
+                } finally {
+                    if (!readbackWork) release()
                 }
-                const pixels = straightenReadback(readback, width, height, backend === 'webgl')
-                frameOptions.onProgress?.({ requestId: frameOptions.requestId, stage: 'render', completed: 1, total: 1 })
-                return { width, height, pixels }
             },
             dispose,
         }
     } catch (error) {
         target?.dispose()
         if (runtime) disposeRuntime(runtime)
-        renderer?.dispose()
         throw error
     }
 }

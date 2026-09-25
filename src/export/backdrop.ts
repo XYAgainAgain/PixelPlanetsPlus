@@ -1,5 +1,5 @@
 import { createRng, deriveSeed, type Rng } from '../rng'
-import type { BackdropV1 } from './types'
+import type { BackdropStarsV2, BackdropV2 } from './types'
 
 const STAR_SEED_SALT = 0x53544152
 const BASE_STAR_COUNT = 1000
@@ -190,7 +190,7 @@ const paintStars = (
     output: Uint8ClampedArray,
     width: number,
     height: number,
-    backdrop: Exclude<BackdropV1, { kind: 'transparent' | 'solid' }>,
+    backdrop: BackdropStarsV2,
     frames: Map<string, StarFrame>,
 ): void => {
     const rng = createRng(deriveSeed(backdrop.seed, STAR_SEED_SALT))
@@ -227,26 +227,25 @@ export interface BackdropRasterizer {
 }
 
 export const createBackdropRasterizer = async (
-    backdrop: BackdropV1,
+    backdrop: BackdropV2,
     width: number,
     height: number,
     loadedFrames?: Map<string, StarFrame>,
 ): Promise<BackdropRasterizer> => {
     const output = new Uint8ClampedArray(width * height * 4)
-    if (backdrop.kind === 'solid') {
-        const color = parseColor(backdrop.color)
+    const { base, stars } = backdrop
+    if (base.kind === 'solid') {
+        const color = parseColor(base.color)
         for (let offset = 0; offset < output.length; offset += 4) {
             output[offset] = color[0]
             output[offset + 1] = color[1]
             output[offset + 2] = color[2]
             output[offset + 3] = 255
         }
-    } else if (backdrop.kind === 'gradient' || backdrop.kind === 'stars-gradient') {
-        paintGradient(output, width, height, backdrop.gradientPhase)
+    } else if (base.kind === 'gradient') {
+        paintGradient(output, width, height, base.phase)
     }
-    if (backdrop.kind === 'stars' || backdrop.kind === 'stars-gradient') {
-        paintStars(output, width, height, backdrop, loadedFrames ?? await getStarFrames())
-    }
+    if (stars) paintStars(output, width, height, stars, loadedFrames ?? await getStarFrames())
     return {
         renderBand: (startY, rowCount) => output.slice(startY * width * 4, (startY + rowCount) * width * 4),
     }

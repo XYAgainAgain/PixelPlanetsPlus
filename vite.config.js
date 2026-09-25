@@ -15,4 +15,12 @@ const stripPgOnly = () => ({
 export default defineConfig({
   base: './',
   plugins: [tailwindcss(), stripPgOnly()],
+  build: {
+    rolldownOptions: {
+      output: {
+        // three changes far less often than our code, so it caches as its own chunk across deploys
+        codeSplitting: { groups: [{ name: 'three', test: /[\\/]node_modules[\\/]three[\\/]/ }] },
+      },
+    },
+  },
 })

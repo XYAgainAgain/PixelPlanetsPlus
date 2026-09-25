@@ -1,9 +1,11 @@
-import { PLANET_FACTORIES } from '../tsl/registry'
+import { TEXTURE_CEILING } from '../gpu'
 import { PLANETS } from '../tsl/values'
-import { MAX_EXPORT_DIMENSION, MAX_EXPORT_PIXELS } from './recipe'
+import { SCENE_PACKAGE_BASE_PASSES } from './contract'
+import { canonicalFrameSize } from './layout'
 import type { RenderRequest } from './types'
 
 export interface PreflightLimits {
+    // The device's own limit; preflight caps it at TEXTURE_CEILING itself.
     maxTextureDimension2D: number
     maxWorkingBytes?: number
     maxBlobBytes?: number
@@ -34,10 +36,7 @@ const bytes = (value: number): string => {
 }
 
 const dimensions = (request: RenderRequest): PreflightEstimate => {
-    const planetName = PLANETS[request.recipe.celestialType].name
-    const factory = PLANET_FACTORIES.find((entry) => entry.metadata.name === planetName)
-    if (!factory) throw new Error(`unknown celestial body: ${request.recipe.celestialType}`)
-    const canonical = Math.round(request.recipe.pixels * factory.metadata.relativeScale)
+    const canonical = canonicalFrameSize(request.recipe.celestialType, request.recipe.pixels)
     const scale = request.recipe.export.scale
     const frameWidth = canonical * scale
     const frameHeight = frameWidth
@@ -59,14 +58,24 @@ const dimensions = (request: RenderRequest): PreflightEstimate => {
     const outputPixels = outputWidth * outputHeight
     const frameBytes = frameWidth * frameHeight * 4
     const outputBytes = outputPixels * 4
-    const layerPasses = request.includeLayers ? factory.metadata.layers.length : 0
-    const packageImages = format === 'scene-package' ? 3 + layerPasses : 1
+    // Counting every layer, hidden ones too, keeps the estimate at or above what the exporter can retain.
+    const layerPasses = request.includeLayers ? PLANETS[request.recipe.celestialType].layers.length : 0
+    const packageImages = format === 'scene-package' ? SCENE_PACKAGE_BASE_PASSES.length + layerPasses : 1
     const passBufferBytes = format === 'scene-package' ? outputBytes * packageImages : 0
     const renderTargetBytes = canonical * canonical * 4
     const gpuTextureBytes = renderTargetBytes * 2
+    // Animated frames hold, at once: the frozen backdrop, the readback plus its straightened copy and 2D
+    // source canvas, and the zoomed output canvas; GIF adds the transferred RGBA and its indexed frame.
+    const { backdrop } = request.recipe
+    const frozenBackdropBytes = backdrop.base.kind !== 'transparent' || backdrop.stars ? frameBytes : 0
+    const frameWorkBytes = frozenBackdropBytes + renderTargetBytes * 3 + frameBytes
     const encoderBytes = format === 'gif'
-        ? frameBytes + frameWidth * frameHeight + 256 * 4 + 32_768 * 4
-        : outputBytes
+        ? frameWorkBytes + frameBytes + frameWidth * frameHeight + 4096 * 4 + 256 * 4 + 32_768 * 4
+        : format === 'spritesheet'
+            ? frameWorkBytes + outputBytes
+            : format === 'png-sequence'
+                ? frameWorkBytes + frameBytes
+                : outputBytes
     const uncompressedOutputBytes = format === 'gif'
         ? frameWidth * frameHeight * request.recipe.export.frameCount
         : format === 'png-sequence'
@@ -93,7 +102,7 @@ export const preflightRenderRequest = (request: RenderRequest, limits: Preflight
     const estimate = dimensions(request)
     const reasons: string[] = []
     const details: string[] = []
-    const textureLimit = limits.maxTextureDimension2D
+    const textureLimit = Math.min(limits.maxTextureDimension2D, TEXTURE_CEILING)
     const deviceReason = 'That size is too big for this device. Try a smaller canvas or a lower scale.'
     const memoryReason = 'That export needs more memory than this device has. Try a smaller canvas, fewer frames, or a lower scale.'
     const reject = (reason: string, detail: string): void => {
@@ -104,29 +113,18 @@ export const preflightRenderRequest = (request: RenderRequest, limits: Preflight
     if (!Number.isInteger(textureLimit) || textureLimit < 1) {
         reject(deviceReason, `Device texture/render-target limit must be a positive integer; received ${textureLimit}.`)
     } else {
-        if (estimate.renderTarget.width > textureLimit) {
-            reject(deviceReason, `Canonical render-target width ${estimate.renderTarget.width}px exceeds the device texture/render-target limit of ${textureLimit}px.`)
-        }
-        if (estimate.renderTarget.height > textureLimit) {
-            reject(deviceReason, `Canonical render-target height ${estimate.renderTarget.height}px exceeds the device texture/render-target limit of ${textureLimit}px.`)
-        }
-        if (request.format === 'spritesheet' && estimate.output.width > textureLimit) {
-            reject(deviceReason, `Spritesheet width ${estimate.output.width}px exceeds the device texture/render-target limit of ${textureLimit}px.`)
-        }
-        if (request.format === 'spritesheet' && estimate.output.height > textureLimit) {
-            reject(deviceReason, `Spritesheet height ${estimate.output.height}px exceeds the device texture/render-target limit of ${textureLimit}px.`)
+        // One ceiling for every edge, so the answer never depends on which backend or output format is in play.
+        const edges: readonly [string, number][] = [
+            ['Canonical render-target width', estimate.renderTarget.width],
+            ['Canonical render-target height', estimate.renderTarget.height],
+            ['Output width', estimate.output.width],
+            ['Output height', estimate.output.height],
+        ]
+        for (const [label, value] of edges) {
+            if (value > textureLimit) reject(deviceReason, `${label} ${value}px exceeds the export ceiling of ${textureLimit}px.`)
         }
     }
 
-    if (estimate.output.width > MAX_EXPORT_DIMENSION) {
-        reject(deviceReason, `Output width ${estimate.output.width}px exceeds the format ceiling of ${MAX_EXPORT_DIMENSION}px.`)
-    }
-    if (estimate.output.height > MAX_EXPORT_DIMENSION) {
-        reject(deviceReason, `Output height ${estimate.output.height}px exceeds the format ceiling of ${MAX_EXPORT_DIMENSION}px.`)
-    }
-    if (estimate.output.pixels > MAX_EXPORT_PIXELS) {
-        reject(deviceReason, `Output area ${estimate.output.pixels.toLocaleString('en-US')} pixels exceeds the format ceiling of ${MAX_EXPORT_PIXELS.toLocaleString('en-US')} pixels.`)
-    }
     if (limits.maxWorkingBytes !== undefined && estimate.peakWorkingBytes > limits.maxWorkingBytes) {
         reject(memoryReason, `Worst-case working memory ${bytes(estimate.peakWorkingBytes)} exceeds the configured limit of ${bytes(limits.maxWorkingBytes)}.`)
     }

@@ -9,20 +9,20 @@ import { createBackdropRasterizer } from './backdrop'
 import { playbackPhases, sequenceMetadata, spritesheetMetadata, uniquePhases, zip } from './animated'
 import { createSpritesheetGrid } from './layout'
 import { bodyLocalToLightUv, lightUvToBodyLocal } from './runtime'
-import { distributeGifDelays } from './timing'
-import type { RenderRequest, SceneRecipeV1 } from './types'
+import { exportFilename, sequenceFrameFilename } from './filenames'
+import type { ExportFormat, RenderRequest, SceneRecipeV2, SequenceMetadataV2, SpritesheetMetadataV2 } from './types'
 
-const recipe = (overrides: Partial<SceneRecipeV1['export']> = {}): SceneRecipeV1 => ({
-    schema: 'pixelplanetsplus-scene@1',
+const recipe = (overrides: Partial<SceneRecipeV2['export']> = {}): SceneRecipeV2 => ({
+    schema: 'pixelplanetsplus-scene@2',
     celestialType: 'terranWet',
     canvas: { width: 32, height: 24 },
-    body: { center: [0.5, 0.5], size: 1, phase: 0, rotation: 0, light: [0.39, 0.39] },
+    body: { center: [0.5, 0.5], phase: 0, rotation: 0, light: [0.39, 0.39] },
     seed: 7,
     pixels: 32,
     palette: [['#112233', '#445566']],
     layers: [{ id: 'land', visible: true }],
     dither: true,
-    backdrop: { kind: 'transparent' },
+    backdrop: { base: { kind: 'transparent' }, stars: null },
     export: {
         scale: 1,
         frameCount: 5,
@@ -37,7 +37,7 @@ const recipe = (overrides: Partial<SceneRecipeV1['export']> = {}): SceneRecipeV1
     effects: [],
 })
 
-const request = (overrides: Partial<SceneRecipeV1['export']> = {}): RenderRequest => ({
+const request = (overrides: Partial<SceneRecipeV2['export']> = {}): RenderRequest => ({
     id: 'packaging-test',
     recipe: recipe(overrides),
     format: 'png-sequence',
@@ -46,6 +46,21 @@ const request = (overrides: Partial<SceneRecipeV1['export']> = {}): RenderReques
 })
 
 const bytes = async (blob: Blob): Promise<Uint8Array> => new Uint8Array(await blob.arrayBuffer())
+
+// A consumer's view: rebuild every cell rectangle from the JSON document alone, nothing else.
+const sliceFromMetadata = (json: string) => {
+    const metadata = JSON.parse(json) as SpritesheetMetadataV2
+    const { count, columns, margin } = metadata.grid
+    const { width, height } = metadata.frame
+    return Array.from({ length: count }, (_, index) => ({
+        index,
+        x: margin + (index % columns) * (width + margin),
+        y: margin + Math.floor(index / columns) * (height + margin),
+        width,
+        height,
+        phase: metadata.phases.first + index * metadata.phases.step,
+    }))
+}
 
 describe('export packaging', () => {
     it('converts body-local light coordinates at the shader boundary', () => {
@@ -71,34 +86,73 @@ describe('export packaging', () => {
         expect(phases.filter(phase => phase === 1)).toHaveLength(1)
     })
 
-    it('describes spritesheet layout, playback order, and distributed timing', () => {
-        const exportRequest = request({ direction: 'ping-pong', frameCount: 6, columns: 2, margin: 1, framesPerSecond: 10 })
-        const metadata = spritesheetMetadata(exportRequest, 8, 6)
-        const grid = createSpritesheetGrid(4, 2, 8, 6, 1)
+    it('lets a consumer slice the v2 spritesheet from its metadata alone', () => {
+        for (const overrides of [
+            { direction: 'ping-pong', frameCount: 6, columns: 2, margin: 1 },
+            { direction: 'forward', frameCount: 5, columns: 3, margin: 2 },
+            { direction: 'reverse', frameCount: 7, columns: 4, margin: 0, startPhase: 0.25, endPhase: 0.75 },
+        ] as const) {
+            const exportRequest = request(overrides)
+            const metadata = spritesheetMetadata(exportRequest, 8, 6)
+            const grid = createSpritesheetGrid(uniquePhases(exportRequest).length, overrides.columns, 8, 6, overrides.margin)
+            const slices = sliceFromMetadata(JSON.stringify(metadata))
 
-        expect(metadata.schema).toBe('pixelplanetsplus-spritesheet@1')
-        expect(metadata.grid).toMatchObject({ columns: grid.columns, rows: grid.rows })
-        expect(metadata.frames).toEqual(grid.frames.map((frame, index) => ({
-            ...frame,
-            phase: uniquePhases(exportRequest)[index],
-            durationMilliseconds: 100,
-        })))
-        expect(metadata.playback.order).toEqual([0, 1, 2, 3, 2, 1])
-        expect(spritesheetMetadata(request({ frameCount: 5, columns: 3 }), 8, 6).playback.order)
-            .toEqual([0, 1, 2, 3, 4])
-        expect(metadata.frames.reduce((total, frame) => total + frame.durationMilliseconds, 0))
-            .toBe(distributeGifDelays(10, metadata.frames.length).reduce((total, delay) => total + delay * 10, 0))
+            expect(metadata.schema).toBe('pixelplanetsplus-spritesheet@2')
+            expect(metadata.image).toEqual({ width: grid.width, height: grid.height })
+            expect(slices.map(({ phase: _phase, ...rect }) => rect)).toEqual(grid.frames)
+            slices.forEach((slice, index) => { expect(slice.phase).toBeCloseTo(uniquePhases(exportRequest)[index]!, 12) })
+            // Every slice lies inside the image the metadata declares.
+            expect(slices.every(slice => slice.x + slice.width <= metadata.image.width && slice.y + slice.height <= metadata.image.height)).toBe(true)
+        }
     })
 
-    it('describes sequence schema, frame count, and phases', () => {
+    it('keeps v2 spritesheet metadata compact and states playback order only when it is not identity', () => {
+        const pingPong = spritesheetMetadata(request({ direction: 'ping-pong', frameCount: 6, columns: 2, margin: 1, framesPerSecond: 10 }), 8, 6)
+        expect(pingPong.playback.order).toEqual([0, 1, 2, 3, 2, 1])
+        expect(pingPong.playback.frameDurationMilliseconds).toBe(100)
+        expect(spritesheetMetadata(request({ frameCount: 5, columns: 3 }), 8, 6).playback.order).toBeUndefined()
+        const large = spritesheetMetadata(request({ frameCount: 64, columns: 8 }), 400, 400)
+        expect(JSON.stringify(large).length).toBeLessThan(700)
+    })
+
+    it.each(['forward', 'reverse', 'ping-pong'] as const)('derives %s playback order structurally when start equals end', direction => {
+        const metadata = spritesheetMetadata(request({ direction, frameCount: 6, startPhase: 0.4, endPhase: 0.4 }), 8, 6)
+        expect(metadata.phases).toEqual({ first: 0.4, step: 0 })
+        if (direction === 'ping-pong') {
+            expect(metadata.grid.count).toBe(4)
+            expect(metadata.playback.order).toEqual([0, 1, 2, 3, 2, 1])
+        } else {
+            expect(metadata.grid.count).toBe(6)
+            expect(metadata.playback).not.toHaveProperty('order')
+        }
+    })
+
+    it('describes the v2 sequence by filename pattern and phase range', () => {
         const exportRequest = request({ direction: 'reverse', frameCount: 4 })
         const phases = playbackPhases(exportRequest)
-        const metadata = sequenceMetadata(exportRequest, 8, 6, phases)
+        const metadata: SequenceMetadataV2 = sequenceMetadata(exportRequest, 8, 6, phases)
 
-        expect(metadata.schema).toBe('pixelplanetsplus-sequence@1')
-        expect(metadata.frames).toHaveLength(4)
-        expect(metadata.frames.map(frame => frame.phase)).toEqual(phases)
-        expect(metadata.frames.map(frame => frame.index)).toEqual([0, 1, 2, 3])
+        expect(metadata.schema).toBe('pixelplanetsplus-sequence@2')
+        expect(metadata.files.count).toBe(4)
+        const names = Array.from({ length: metadata.files.count }, (_, index) =>
+            `${metadata.files.prefix}${String(index + 1).padStart(metadata.files.digits, '0')}.png`)
+        expect(names).toEqual(phases.map((_, index) => sequenceFrameFilename(exportRequest.recipe, index)))
+        const range = metadata.phases as { first: number, step: number }
+        phases.forEach((phase, index) => { expect(range.first + index * range.step).toBeCloseTo(phase, 12) })
+
+        const pingPong = playbackPhases(request({ direction: 'ping-pong', frameCount: 6 }))
+        expect(sequenceMetadata(request({ direction: 'ping-pong', frameCount: 6 }), 8, 6, pingPong).phases).toEqual(pingPong)
+    })
+
+    it('gives every export format its own deterministic filename', () => {
+        const recipe = { celestialType: 'lavaWorld', seed: 149804 } as const
+        const formats: ExportFormat[] = ['png', 'gif', 'scene-package', 'spritesheet', 'png-sequence']
+        expect(formats.map(format => exportFilename(recipe, format))).toEqual([
+            'lava-149804.png', 'lava-149804.gif', 'lava-149804-scene.zip', 'lava-149804-spritesheet.zip', 'lava-149804-frames.zip',
+        ])
+        expect(exportFilename(recipe, 'spritesheet', false)).toBe('lava-149804-spritesheet.png')
+        expect(sequenceFrameFilename(recipe, 0)).toBe('lava-149804-frames-0001.png')
+        expect(new Set(formats.map(format => exportFilename(recipe, format))).size).toBe(formats.length)
     })
 
     it('round-trips ZIP entries and produces deterministic bytes', async () => {
@@ -122,9 +176,10 @@ describe('export packaging', () => {
                 for (const color of ['#ffef9e', '#ffffff']) frames.set(`${special}:${frame}:${color}`, { image: sprite, brightImage: sprite })
             }
         }
-        const backdrop = { kind: 'stars', seed: 17, density: 0.1, brightness: 1, starScale: 1, specialStarMix: 0.2, gradientPhase: 0 } as const
-        const denser = { ...backdrop, density: 0.2 }
-        const changed = { ...backdrop, seed: 18 }
+        const stars = { seed: 17, density: 0.1, brightness: 1, starScale: 1, specialStarMix: 0.2 }
+        const backdrop = { base: { kind: 'transparent' }, stars } as const
+        const denser = { ...backdrop, stars: { ...stars, density: 0.2 } }
+        const changed = { ...backdrop, stars: { ...stars, seed: 18 } }
         const low = (await createBackdropRasterizer(backdrop, 512, 512, frames)).renderBand(0, 512)
         const high = (await createBackdropRasterizer(denser, 512, 512, frames)).renderBand(0, 512)
         const other = (await createBackdropRasterizer(changed, 512, 512, frames)).renderBand(0, 512)
@@ -135,5 +190,13 @@ describe('export packaging', () => {
         expect(populated(high).length).toBeGreaterThan(populated(low).length)
         expect(populated(low).every(index => high[index * 4 + 3]! > 0)).toBe(true)
         expect(other).not.toEqual(low)
+
+        // Stars on a solid matte: every pixel is opaque, and the stars change pixels the bare matte leaves black.
+        const matte = { base: { kind: 'solid', color: '#102030' }, stars: null } as const
+        const bare = (await createBackdropRasterizer(matte, 512, 512, frames)).renderBand(0, 512)
+        const starry = (await createBackdropRasterizer({ ...matte, stars }, 512, 512, frames)).renderBand(0, 512)
+        expect(Array.from({ length: 512 * 512 }, (_, index) => starry[index * 4 + 3]).every(alpha => alpha === 255)).toBe(true)
+        expect(Array.from(bare.subarray(0, 4))).toEqual([16, 32, 48, 255])
+        expect(starry).not.toEqual(bare)
     })
 })

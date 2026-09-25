@@ -75,6 +75,8 @@ export interface PlanetValues {
     ditherLayers: readonly string[]
     // Empty when a one-layer body has no useful visibility toggle.
     layerMenu?: readonly number[]
+    // Content past the largest layer's quad, in base-quad units per side (Islands' atmosphere rim reaches 1.04).
+    frameOverhang?: number
     layers: readonly LayerValues[]
 }
 
@@ -143,6 +145,7 @@ export const PLANETS = {
         scene: 'LandMasses/LandMasses.tscn',
         relativeScale: 1.0,
         guiZoom: 1.0,
+        frameOverhang: 0.02,
         lightDrag: true,
         ditherLayers: ['Water'],
         layers: [

@@ -1,10 +1,12 @@
-import { LinearSRGBColorSpace, Mesh, PerspectiveCamera, Scene, WebGPURenderer } from 'three/webgpu'
+import { LinearSRGBColorSpace, Mesh, PerspectiveCamera, WebGPURenderer } from 'three/webgpu'
 import { BACKGROUND_MODES, createBackground, type BackgroundMode } from './background'
+import { createGpuContext, routeBackend, type GpuBackend, type GpuHost } from './gpu'
+import { createLiveView, type LiveView } from './liveView'
 import { Color } from './palette'
-import { createSceneComposer, type SceneComposer } from './export/composer'
-import { decodeSceneRecipe, encodeSceneRecipe, SCENE_SCHEMA } from './export/recipe'
-import { bodyLocalToLightUv, lightUvToBodyLocal } from './export/runtime'
-import type { BackdropV1, SceneRecipeV1 } from './export/types'
+import { createThrottle } from './throttle'
+import type { SceneComposer } from './export/composer'
+import { bodyLocalToLightUv, lightUvToBodyLocal } from './export/layout'
+import type { BackdropV2, SceneRecipeV2 } from './export/types'
 import { decodeWorldParams, encodeWorldParams } from './export/worldParams'
 import { LAND_PHASE_PER_QUAD } from './tsl/planets/islands'
 import { PLANET_FACTORIES, createPlanet, type PlanetRuntime } from './tsl/registry'
@@ -15,6 +17,9 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
     if (!el) throw new Error(`missing #${id}`)
     return el as T
 }
+
+// The scene codec (and its deflate dependency) only loads for scene links and customized worlds.
+const loadRecipeCodec = () => import('./export/recipe')
 
 const seedFromUrl = (): number => {
     const raw = new URLSearchParams(location.search).get('seed')
@@ -27,10 +32,11 @@ const backgroundFromUrl = (): BackgroundMode => {
     return BACKGROUND_MODES.find((mode) => mode.toLowerCase() === raw?.toLowerCase()) ?? 'Stars'
 }
 
-const sceneFromUrl = (): { recipe: SceneRecipeV1 | null, warning: string | null } => {
+const sceneFromUrl = async (): Promise<{ recipe: SceneRecipeV2 | null, warning: string | null }> => {
     const payload = new URLSearchParams(location.search).get('scene')
     if (payload === null) return { recipe: null, warning: null }
     try {
+        const { decodeSceneRecipe } = await loadRecipeCodec()
         return { recipe: decodeSceneRecipe(payload), warning: null }
     } catch (error) {
         console.error('Scene link could not be decoded.', error)
@@ -51,20 +57,20 @@ const planetId = (planet: PlanetRuntime): PlanetTypeId => {
     return entry[0] as PlanetTypeId
 }
 
-const liveBackdropRecipe = (mode: BackgroundMode, seed: number, phase: number): BackdropV1 => {
-    const gradientPhase = ((phase % 1) + 1) % 1
-    const backdrop = { seed, density: 1, brightness: 1, starScale: 1, specialStarMix: 0.5, gradientPhase }
-    if (mode === 'None') return { kind: 'transparent' }
-    if (mode === 'Stars') return { kind: 'stars', ...backdrop }
-    if (mode === 'Gradient') return { kind: 'gradient', ...backdrop }
-    return { kind: 'stars-gradient', ...backdrop }
+const liveBackdropRecipe = (mode: BackgroundMode, seed: number, phase: number): BackdropV2 => {
+    const gradient = mode === 'Gradient' || mode === 'Stars on Gradient'
+    const stars = mode === 'Stars' || mode === 'Stars on Gradient'
+    return {
+        base: gradient ? { kind: 'gradient', phase: ((phase % 1) + 1) % 1 } : { kind: 'transparent' },
+        stars: stars ? { seed, density: 1, brightness: 1, starScale: 1, specialStarMix: 0.5 } : null,
+    }
 }
 
-const backgroundModeForRecipe = (backdrop: BackdropV1): BackgroundMode => {
-    if (backdrop.kind === 'stars') return 'Stars'
-    if (backdrop.kind === 'gradient') return 'Gradient'
-    if (backdrop.kind === 'stars-gradient') return 'Stars on Gradient'
-    return 'None'
+// The live view has no solid base, so a solid export backdrop shows as its star layer (or none).
+const backgroundModeForRecipe = (backdrop: BackdropV2): BackgroundMode => {
+    const gradient = backdrop.base.kind === 'gradient'
+    if (backdrop.stars) return gradient ? 'Stars on Gradient' : 'Stars'
+    return gradient ? 'Gradient' : 'None'
 }
 
 const framingScale = (planet: PlanetRuntime, stageAspect: number): number => {
@@ -85,13 +91,18 @@ const disposePlanet = (planet: PlanetRuntime): void => {
     planet.group.removeFromParent()
 }
 
+// Live cap: past ~2048 the monster fragment shaders blow the 2 s GPU timeout.
+const LIVE_TARGET_CAP = 2048
+// Canvas reconfigures are what hang pre-155 Firefox, so stage resizes coalesce to one per 150 ms plus a settle.
+const CANVAS_RESIZE_INTERVAL = 150
+
 async function init(): Promise<void> {
     const stage = $('stage')
     // Renderer canvases mount here, not on #stage: the aberration filter must not touch text
     const canvasStack = $('canvas-stack')
     const starCanvas = $<HTMLCanvasElement>('star-layer')
     const urlParams = new URLSearchParams(location.search)
-    const decodedScene = sceneFromUrl()
+    const decodedScene = await sceneFromUrl()
     let loadedScene = decodedScene.recipe
     const hasLegacyParams = urlParams.has('seed') || urlParams.has('background')
     const seededWorldDefaults = decodeWorldParams(new URLSearchParams())
@@ -107,11 +118,9 @@ async function init(): Promise<void> {
     const seedInput = $<HTMLInputElement>('seed-value')
     seedInput.value = String(seed)
 
-    const backendName = (candidate: WebGPURenderer): string => {
-        const backend = candidate.backend as unknown as { isWebGPUBackend?: boolean, isWebGLBackend?: boolean }
-        if (backend.isWebGPUBackend) return 'WebGPU'
-        if (backend.isWebGLBackend) return 'WebGL'
-        return 'unknown'
+    const backendOf = (candidate: WebGPURenderer): GpuBackend => {
+        const backend = candidate.backend as unknown as { isWebGPUBackend?: boolean }
+        return backend.isWebGPUBackend ? 'webgpu' : 'webgl'
     }
     const initializeForcedWebGL = async (canvas?: HTMLCanvasElement): Promise<WebGPURenderer> => {
         const fallback = new WebGPURenderer({ antialias: false, alpha: true, forceWebGL: true, canvas })
@@ -123,7 +132,7 @@ async function init(): Promise<void> {
                     watchdog = window.setTimeout(() => { reject(new Error('Forced WebGL initialization timed out after 4 seconds')) }, 4000)
                 }),
             ])
-            console.info(`Renderer backend: ${backendName(fallback)} (forced fallback)`)
+            console.info(`Renderer backend: ${backendOf(fallback)} (forced fallback)`)
             return fallback
         } catch (error: unknown) {
             fallback.dispose()
@@ -133,14 +142,9 @@ async function init(): Promise<void> {
         }
     }
     const initializeRenderer = async (canvas?: HTMLCanvasElement): Promise<{ renderer: WebGPURenderer, forced: boolean }> => {
-        // ?backend=webgl forces the Firefox code path anywhere, for debugging the fallback
-        if (new URLSearchParams(location.search).get('backend') === 'webgl') {
-            console.info('backend=webgl requested; forcing WebGL.')
-            return { renderer: await initializeForcedWebGL(canvas), forced: true }
-        }
-        // Firefox WebGPU (2026-08) hangs on swapchain resize; WebGL2 there for now
-        if (navigator.userAgent.includes('Firefox/')) {
-            console.info('Firefox detected; using WebGL until its WebGPU handles resizes.')
+        const route = routeBackend(location.search, navigator.userAgent)
+        if (route.backend === 'webgl') {
+            console.info(`${route.reason}; using WebGL.`)
             return { renderer: await initializeForcedWebGL(canvas), forced: true }
         }
         const primary = new WebGPURenderer({ antialias: false, alpha: true, canvas })
@@ -152,7 +156,7 @@ async function init(): Promise<void> {
                     watchdog = window.setTimeout(() => { reject(new Error('WebGPU initialization timed out after 4 seconds')) }, 4000)
                 }),
             ])
-            console.info(`Renderer backend: ${backendName(primary)}`)
+            console.info(`Renderer backend: ${backendOf(primary)} (${route.reason})`)
             return { renderer: primary, forced: false }
         } catch (error: unknown) {
             console.info('WebGPU initialization failed or stalled; trying forced WebGL.', error)
@@ -175,9 +179,21 @@ async function init(): Promise<void> {
     }
     configureRenderer(renderer)
 
-    const scene = new Scene()
+    // One renderer for the whole page: the live view, the composer preview, and every export share it.
+    let gpuGeneration = 0
+    let gpuState = createGpuContext(renderer, backendOf(renderer), gpuGeneration)
+    const gpu: GpuHost = { current: () => gpuState.context }
+    const adoptRenderer = (next: WebGPURenderer): void => {
+        gpuState.markLost()
+        renderer = next
+        gpuGeneration += 1
+        gpuState = createGpuContext(renderer, backendOf(renderer), gpuGeneration)
+    }
+    const liveTargetCap = (): number => Math.min(LIVE_TARGET_CAP, gpu.current().textureLimit)
+
     const camera = new PerspectiveCamera(75, 1, 0.1, 100000)
     camera.position.z = 1
+    let liveView: LiveView = createLiveView(camera)
 
     const loadedRecipe = loadedScene ?? loadedWorld
     let planet = createPlanet(loadedRecipe?.celestialType ? PLANETS[loadedRecipe.celestialType].name : 'Islands', seed)
@@ -196,7 +212,7 @@ async function init(): Promise<void> {
         }
         if (loadedRecipe.body?.light && planet.lightOrigin) planet.lightOrigin.value.set(...bodyLocalToLightUv(loadedRecipe.body.light))
     }
-    scene.add(planet.group)
+    liveView.scene.add(planet.group)
     const safeBackground = (mode: BackgroundMode, backgroundSeed: number) => {
         try {
             return createBackground(mode, backgroundSeed, starCanvas)
@@ -205,102 +221,89 @@ async function init(): Promise<void> {
             return createBackground('None', backgroundSeed, starCanvas)
         }
     }
-    let backgroundSeed = loadedRecipe?.backdrop && 'seed' in loadedRecipe.backdrop ? loadedRecipe.backdrop.seed : seed
+    let backgroundSeed = loadedRecipe?.backdrop?.stars?.seed ?? seed
     let background = safeBackground(loadedRecipe?.backdrop
         ? backgroundModeForRecipe(loadedRecipe.backdrop)
         : decodedScene.warning ? 'Stars' : backgroundFromUrl(), backgroundSeed)
 
     let canvas = renderer.domElement
-    const rendererLimit = (): number => {
-        // Live cap: past ~2048 the monster fragment shaders blow the 2 s GPU timeout (Sam's call).
-        // Exports/CLI render offline later at full resolution.
-        try {
-            const backend = renderer.backend as unknown as {
-                device?: { limits?: { maxTextureDimension2D?: unknown } }
-            }
-            const deviceLimit = backend?.device?.limits?.maxTextureDimension2D
-            return typeof deviceLimit === 'number' && Number.isFinite(deviceLimit)
-                ? Math.min(2048, deviceLimit)
-                : 2048
-        } catch {
-            return 2048
-        }
+
+    // Pixels and planet changes only touch the body target, never the canvas context.
+    const syncBody = (): void => {
+        liveView.syncBody(planet, framingScale(planet, camera.aspect), liveTargetCap())
     }
 
-    let resizeFrame = 0
     let bufferWidth = 0
     let bufferHeight = 0
-    const applyResize = (): void => {
-        resizeFrame = 0
+    // The canvas follows the stage's device-pixel box only, so a Pixels drag never reconfigures it.
+    const applyCanvasSize = (): void => {
         const w = stage.clientWidth
         const h = stage.clientHeight
         // A collapsed flex stage would mean aspect NaN and a zero-size GPU texture
         if (w === 0 || h === 0) return
         camera.aspect = w / h
         camera.updateProjectionMatrix()
-        const pixels = planet.pixels.value
-        const scale = framingScale(planet, camera.aspect)
-        planet.group.scale.setScalar(scale)
-        const projectionHeight = pixels * 2 * Math.tan((camera.fov * Math.PI) / 360) / scale
-        const largestLayer = Math.max(...planet.metadata.layers.map((layer) => layer.quadScale))
-        const desiredHeight = Math.ceil(Math.max(projectionHeight, pixels * largestLayer))
-        const desiredWidth = Math.ceil(desiredHeight * camera.aspect)
-        const bufferScale = Math.min(1, rendererLimit() / Math.max(desiredWidth, desiredHeight))
-        const nextWidth = Math.max(1, Math.floor(desiredWidth * bufferScale))
-        const nextHeight = Math.max(1, Math.floor(desiredHeight * bufferScale))
+        const ratio = window.devicePixelRatio || 1
+        const limit = gpu.current().textureLimit
+        const fit = Math.min(1, limit / Math.max(w * ratio, h * ratio))
+        const nextWidth = Math.max(1, Math.round(w * ratio * fit))
+        const nextHeight = Math.max(1, Math.round(h * ratio * fit))
         if (nextWidth !== bufferWidth || nextHeight !== bufferHeight) {
             renderer.setSize(nextWidth, nextHeight, false)
             bufferWidth = nextWidth
             bufferHeight = nextHeight
         }
-        background.resize(w, h, pixels)
+        syncBody()
+        background.resize(w, h, planet.pixels.value)
     }
-    const resize = (): void => {
-        if (resizeFrame !== 0) return
-        resizeFrame = requestAnimationFrame(applyResize)
-    }
+    const canvasResize = createThrottle(applyCanvasSize, CANVAS_RESIZE_INTERVAL)
+    const resize = (): void => { canvasResize.request() }
     new ResizeObserver(resize).observe(stage)
     // Android keyboards resize the visual viewport without always re-firing the observer;
     // re-running layout when the viewport settles un-wedges the stage after keyboard close
     window.visualViewport?.addEventListener('resize', resize)
+    // Zoom changes devicePixelRatio, which no ResizeObserver content box reports.
+    window.addEventListener('resize', resize)
 
     canvasStack.appendChild(renderer.domElement)
-    applyResize()
+    applyCanvasSize()
     background.update(0, 0)
 
     const presentFirstFrame = async (candidate: WebGPURenderer): Promise<void> => {
         // compileAsync never settles on Firefox (both backends); treat it as a best-effort
         // warmup with a 3 s budget and rely on render()'s synchronous compile path instead.
         await Promise.race([
-            candidate.compileAsync(scene, camera).catch(() => {}),
+            liveView.compile(candidate).catch(() => {}),
             new Promise<void>((resolve) => { window.setTimeout(resolve, 3000) }),
         ])
-        candidate.render(scene, camera)
+        liveView.render(candidate)
         await new Promise<void>((resolve) => { requestAnimationFrame(() => { resolve() }) })
     }
 
     try {
         await presentFirstFrame(renderer)
-        console.info(`First frame presented with ${backendName(renderer)}.`)
+        console.info(`First frame presented with ${backendOf(renderer)}.`)
     } catch (error: unknown) {
         if (rendererWasForced) throw error
         console.info('First WebGPU frame failed or stalled; rebuilding with forced WebGL.', error)
         renderer.dispose()
         canvas.remove()
         disposePlanet(planet)
+        liveView.dispose()
+        liveView = createLiveView(camera)
         planet = createPlanet('Islands', seed)
         defaultLight = planet.lightOrigin
             ? lightUvToBodyLocal([planet.lightOrigin.value.x, planet.lightOrigin.value.y])
             : null
-        scene.add(planet.group)
-        renderer = await initializeForcedWebGL()
+        liveView.scene.add(planet.group)
+        adoptRenderer(await initializeForcedWebGL())
         rendererWasForced = true
         configureRenderer(renderer)
         canvas = renderer.domElement
         canvasStack.appendChild(canvas)
         bufferWidth = 0
         bufferHeight = 0
-        applyResize()
+        applyCanvasSize()
         await presentFirstFrame(renderer)
         console.info('First frame presented with forced WebGL after WebGPU first-frame failure.')
     }
@@ -435,6 +438,13 @@ async function init(): Promise<void> {
 
     const animate = (timeMs: number): void => {
         const t = timeMs / 1000
+        // An export or preview holds the shared renderer: freeze on the last frame, resume without a jump.
+        if (gpu.current().queue.busy()) {
+            last = t
+            fpsFrames = 0
+            fpsSince = -1
+            return
+        }
         if (fpsSince < 0) fpsSince = t
         else if (t - fpsSince >= 0.25) {
             fpsOut.textContent = `FPS: ${Math.round(fpsFrames / (t - fpsSince))}`
@@ -455,15 +465,14 @@ async function init(): Promise<void> {
         }
         planet.updateTime(phase)
         background.update(t, dt)
-        renderer.setClearColor(0x000000, 0)
         try {
-            renderer.render(scene, camera)
+            liveView.render(renderer)
         } catch (error: unknown) {
             if (background.mode === 'None') throw error
             console.error('Background rendering failed; continuing with black.', error)
             background.dispose()
             background = safeBackground('None', backgroundSeed)
-            renderer.render(scene, camera)
+            liveView.render(renderer)
         }
     }
 
@@ -498,6 +507,8 @@ async function init(): Promise<void> {
         renderer.onDeviceLost = (info): void => {
             if (recovering) return
             renderer.setAnimationLoop(null)
+            // In-flight exports and previews reject with a visible message instead of waiting forever.
+            gpuState.markLost()
             console.error(`WebGPU device lost: ${info.message}`, info.originalEvent)
             if (recoveryAttempted) {
                 recovering = true
@@ -512,13 +523,13 @@ async function init(): Promise<void> {
                 try {
                     lostRenderer.dispose()
                     initialized = await initializeRenderer(canvas)
-                    renderer = initialized.renderer
+                    adoptRenderer(initialized.renderer)
                     rendererWasForced = initialized.forced
                     configureRenderer(renderer)
                     installDeviceLossHandler()
                     bufferWidth = 0
                     bufferHeight = 0
-                    resize()
+                    applyCanvasSize()
                     document.getElementById('renderer-status')?.remove()
                     recovering = false
                     syncAnimationLoop()
@@ -582,9 +593,6 @@ async function init(): Promise<void> {
         palettePicker.value = colors[activeSwatch]?.toHex() ?? '#000000'
     }
 
-    const syncFraming = (): void => {
-        planet.group.scale.setScalar(framingScale(planet, camera.aspect))
-    }
 
     const syncLayers = (): void => {
         const layerIndices = planet.metadata.layerMenu ?? planet.metadata.layers.map((_, index) => index)
@@ -613,12 +621,12 @@ async function init(): Promise<void> {
             planet.pixels.value = Number(pixelsNumber.value)
             planet.rotation.value = Number(tiltInput.value)
         }
-        syncFraming()
         syncDither()
         syncLayers()
         activeSwatch = 0
         syncPalette()
-        resize()
+        syncBody()
+        background.resize(stage.clientWidth, stage.clientHeight, planet.pixels.value)
     }
 
     typeSelect.addEventListener('change', () => {
@@ -629,7 +637,7 @@ async function init(): Promise<void> {
         defaultLight = planet.lightOrigin
             ? lightUvToBodyLocal([planet.lightOrigin.value.x, planet.lightOrigin.value.y])
             : null
-        scene.add(planet.group)
+        liveView.scene.add(planet.group)
         disposePlanet(outgoing)
         syncPlanetControls()
     })
@@ -664,7 +672,9 @@ async function init(): Promise<void> {
         pixelsInput.value = String(pixels)
         pixelsNumber.value = String(pixels)
         planet.pixels.value = pixels
-        resize()
+        // Live on every tick: only the body target reallocates, the canvas keeps its size.
+        syncBody()
+        background.resize(stage.clientWidth, stage.clientHeight, pixels)
     }
     pixelsInput.addEventListener('input', () => { syncPixels(pixelsInput) })
     pixelsNumber.addEventListener('change', () => { syncPixels(pixelsNumber) })
@@ -780,20 +790,16 @@ async function init(): Promise<void> {
             ? { width: 1920, height: Math.max(1, Math.round(1920 / aspect)) }
             : { width: Math.max(1, Math.round(1920 * aspect)), height: 1920 }
     }
-    const makeCurrentRecipe = (): SceneRecipeV1 => {
+    const makeCurrentRecipe = (): SceneRecipeV2 => {
         const canvasSize = liveExportCanvasSize()
         const source = composer?.recipe()
         const composing = !$('export-workspace').hidden
-        const largestLayer = Math.max(...planet.metadata.layers.map((layer) => layer.quadScale))
-        const currentBodySize = largestLayer * stage.clientHeight * framingScale(planet, camera.aspect)
-            / (2 * Math.tan((camera.fov * Math.PI) / 360)) / Math.max(1, Math.min(stage.clientWidth, stage.clientHeight))
         return {
-            schema: SCENE_SCHEMA,
+            schema: 'pixelplanetsplus-scene@2',
             celestialType: planetId(planet),
             canvas: composing ? source?.canvas ?? canvasSize : loadedScene?.canvas ?? canvasSize,
             body: {
                 center: composing ? source?.body.center ?? [0.5, 0.5] : loadedScene?.body.center ?? [0.5, 0.5],
-                size: composing ? source?.body.size ?? currentBodySize : loadedScene?.body.size ?? currentBodySize,
                 phase: composing ? source?.body.phase ?? sharedPhase % 1 : loadedScene?.body.phase ?? sharedPhase % 1,
                 rotation: planet.rotation.value,
                 light: composing ? source?.body.light ?? null : loadedScene?.body.light
@@ -819,21 +825,19 @@ async function init(): Promise<void> {
         }
     }
     let sceneWriteTimer = 0
+    let sceneWriteTicket = 0
     const samePair = (left: readonly [number, number] | null, right: readonly [number, number] | null): boolean =>
         left === right || (left !== null && right !== null && left[0] === right[0] && left[1] === right[1])
-    const needsSceneUrl = (recipe: SceneRecipeV1): boolean => {
+    const needsSceneUrl = (recipe: SceneRecipeV2): boolean => {
         const canvasSize = liveExportCanvasSize()
-        const largestLayer = Math.max(...planet.metadata.layers.map((layer) => layer.quadScale))
-        const defaultSize = largestLayer * stage.clientHeight * framingScale(planet, camera.aspect)
-            / (2 * Math.tan((camera.fov * Math.PI) / 360)) / Math.max(1, Math.min(stage.clientWidth, stage.clientHeight))
-        const backdrop = recipe.backdrop
-        const customBackdrop = backdrop.kind === 'solid' || (backdrop.kind !== 'transparent'
-            && (backdrop.density !== 1 || backdrop.brightness !== 1 || backdrop.starScale !== 1
-                || backdrop.specialStarMix !== 0.5 || backdrop.gradientPhase !== 0))
+        const { base, stars } = recipe.backdrop
+        // World-param links rebuild the live backdrop, which has no solid base, so a matte needs the scene link.
+        const customBackdrop = base.kind === 'solid' || (base.kind === 'gradient' && base.phase !== 0)
+            || (stars !== null && (stars.density !== 1 || stars.brightness !== 1 || stars.starScale !== 1 || stars.specialStarMix !== 0.5))
         // The composer derives its framing from the stage, so compare loosely: rounding alone is not a customization.
         const near = (value: number, reference: number, tolerance = 1e-4): boolean => Math.abs(value - reference) <= tolerance
         return !near(recipe.canvas.width, canvasSize.width, 1) || !near(recipe.canvas.height, canvasSize.height, 1)
-            || !near(recipe.body.center[0], 0.5) || !near(recipe.body.center[1], 0.5) || !near(recipe.body.size, defaultSize, 1e-3)
+            || !near(recipe.body.center[0], 0.5) || !near(recipe.body.center[1], 0.5)
             || !samePair(recipe.body.light, defaultLight) || customBackdrop
             || recipe.export.scale !== 1 || recipe.export.frameCount !== 60 || recipe.export.columns !== 8
             || recipe.export.margin !== 0 || recipe.export.startPhase !== 0 || recipe.export.endPhase !== 1
@@ -842,55 +846,70 @@ async function init(): Promise<void> {
     const scheduleSceneUrl = (): void => {
         window.clearTimeout(sceneWriteTimer)
         sceneWriteTimer = window.setTimeout(() => {
-            try {
-                const url = new URL(location.href)
-                const recipe = makeCurrentRecipe()
-                url.searchParams.delete('scene')
-                url.searchParams.delete('seed')
-                url.searchParams.delete('background')
-                for (const key of WORLD_PARAM_KEYS) url.searchParams.delete(key)
-                if (needsSceneUrl(recipe)) {
-                    url.searchParams.set('scene', encodeSceneRecipe(recipe))
-                } else {
-                    for (const [key, value] of encodeWorldParams(recipe)) url.searchParams.set(key, value)
+            // The codec loads lazily, so a slow import must never land after a newer write.
+            const ticket = ++sceneWriteTicket
+            void (async () => {
+                try {
+                    const url = new URL(location.href)
+                    const recipe = makeCurrentRecipe()
+                    url.searchParams.delete('scene')
+                    url.searchParams.delete('seed')
+                    url.searchParams.delete('background')
+                    for (const key of WORLD_PARAM_KEYS) url.searchParams.delete(key)
+                    if (needsSceneUrl(recipe)) {
+                        const { encodeSceneRecipe } = await loadRecipeCodec()
+                        url.searchParams.set('scene', encodeSceneRecipe(recipe))
+                    } else {
+                        for (const [key, value] of encodeWorldParams(recipe)) url.searchParams.set(key, value)
+                    }
+                    if (ticket === sceneWriteTicket) history.replaceState(null, '', url)
+                } catch (error: unknown) {
+                    console.error('Scene URL update failed.', error)
                 }
-                history.replaceState(null, '', url)
-            } catch (error: unknown) {
-                console.error('Scene URL update failed.', error)
-            }
+            })()
         }, 300)
     }
+    // The export suite (encoders, zip, compositor) is a separate chunk, fetched the first time it is wanted.
     let composer: SceneComposer | null = null
-    composer = createSceneComposer({
-        stage,
-        backend: () => rendererWasForced ? 'webgl' : 'webgpu',
-        textureLimit: () => {
-            try {
-                const backend = renderer.backend as unknown as {
-                    device?: { limits?: { maxTextureDimension2D?: number } }
-                    gl?: WebGLRenderingContext | WebGL2RenderingContext
-                }
-                const webGpuLimit = backend.device?.limits?.maxTextureDimension2D
-                if (webGpuLimit) return webGpuLimit
-                if (backend.gl) {
-                    const webGlLimit = Number(backend.gl.getParameter(backend.gl.MAX_TEXTURE_SIZE))
-                    if (Number.isFinite(webGlLimit) && webGlLimit > 0) return webGlLimit
-                }
-            } catch {
-                // The conservative fallback is only used when neither backend exposes its real limit.
-            }
-            return 4096
-        },
-        currentRecipe: makeCurrentRecipe,
-        onRecipeChange: (recipe) => { loadedScene = recipe; scheduleSceneUrl() },
-        onClose: (_recipe, changed) => {
-            if (changed) loadedScene = _recipe
-            scheduleSceneUrl()
-        },
-    })
-    if (loadedScene) composer.replaceRecipe(loadedScene)
+    let composerLoading: Promise<SceneComposer> | null = null
+    const loadComposer = (): Promise<SceneComposer> => {
+        composerLoading ??= import('./export/composer').then(({ createSceneComposer }) => {
+            composer = createSceneComposer({
+                stage,
+                gpu,
+                currentRecipe: makeCurrentRecipe,
+                setPixels: (pixels) => {
+                    pixelsNumber.value = String(pixels)
+                    syncPixels(pixelsNumber)
+                    scheduleSceneUrl()
+                    return planet.pixels.value
+                },
+                onRecipeChange: (recipe) => { loadedScene = recipe; scheduleSceneUrl() },
+                onClose: (_recipe, changed) => {
+                    if (changed) loadedScene = _recipe
+                    scheduleSceneUrl()
+                },
+            })
+            return composer
+        }).catch((error: unknown) => {
+            composerLoading = null
+            throw error
+        })
+        return composerLoading
+    }
     for (const format of ['png', 'gif', 'spritesheet'] as const) {
-        $(`export-${format}`).addEventListener('click', () => { composer?.open(format) })
+        const button = $(`export-${format}`)
+        // Warm the chunk on intent so the workspace opens without a visible wait.
+        const prefetch = (): void => { loadComposer().catch(() => {}) }
+        button.addEventListener('pointerenter', prefetch, { once: true })
+        button.addEventListener('focus', prefetch, { once: true })
+        button.addEventListener('click', () => {
+            loadComposer().then((loaded) => { loaded.open(format) }).catch((error: unknown) => {
+                console.error('Export tools failed to load.', error)
+                showRendererMessage('The export tools could not load. Check your connection, then try again.')
+                window.setTimeout(() => { if (!recovering) document.getElementById('renderer-status')?.remove() }, 5000)
+            })
+        })
     }
     const liveControls = [typeSelect, pixelsInput, pixelsNumber, tiltInput, ditherInput, palettePicker]
     for (const control of liveControls) {

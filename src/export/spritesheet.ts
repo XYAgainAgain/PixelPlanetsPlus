@@ -1,27 +1,28 @@
 import type { ExportRunOutput, ExportRunner } from './contract'
 import {
+    animatedFrameSize,
     canvasForSheet,
     createAnimatedSession,
-    exportBaseName,
     metadataBytes,
-    missingTextureLimitWarning,
     pngBlob,
     spritesheetMetadata,
     throwIfAborted,
+    uniquePhases,
     upscaleFrame,
     zip,
 } from './animated'
+import { exportFilename, exportStem } from './filenames'
 import { createSpritesheetGrid } from './layout'
 
 export const exportSpritesheet: ExportRunner = async (request, options): Promise<ExportRunOutput> => {
     if (request.format !== 'spritesheet') throw new Error(`Spritesheet export received ${request.format}.`)
-    const { session, backdrop } = await createAnimatedSession(request, options)
+    // Layout and metadata can reject the request, so they run before the session exists.
     const scale = request.recipe.export.scale
-    const frameWidth = session.width * scale
-    const frameHeight = session.height * scale
-    const metadata = spritesheetMetadata(request, frameWidth, frameHeight)
-    const grid = createSpritesheetGrid(metadata.frames.length, request.recipe.export.columns,
-        frameWidth, frameHeight, request.recipe.export.margin)
+    const size = animatedFrameSize(request)
+    const metadata = spritesheetMetadata(request, size, size)
+    const phases = uniquePhases(request)
+    const grid = createSpritesheetGrid(phases.length, request.recipe.export.columns, size, size, request.recipe.export.margin)
+    const { session, backdrop } = await createAnimatedSession(request, options)
     try {
         const sheet = canvasForSheet(grid.width, grid.height, null)
         const context = sheet.getContext('2d')
@@ -29,7 +30,7 @@ export const exportSpritesheet: ExportRunner = async (request, options): Promise
         context.imageSmoothingEnabled = false
         for (let index = 0; index < grid.frames.length; index += 1) {
             throwIfAborted(options.signal)
-            const frame = await session.renderFrame(metadata.frames[index]!.phase, { requestId: request.id, signal: options.signal })
+            const frame = await session.renderFrame(phases[index]!, { requestId: request.id, signal: options.signal })
             const image = upscaleFrame(frame, scale, backdrop)
             const rect = grid.frames[index]!
             context.drawImage(image, rect.x, rect.y)
@@ -37,18 +38,18 @@ export const exportSpritesheet: ExportRunner = async (request, options): Promise
         }
         throwIfAborted(options.signal)
         const image = await pngBlob(sheet)
-        const baseName = exportBaseName(request)
+        const stem = exportStem(request.recipe, 'spritesheet')
         if (!request.includeMetadata) return {
-            files: [{ filename: `${baseName}.png`, mediaType: 'image/png', data: image }],
-            warnings: missingTextureLimitWarning(options),
+            files: [{ filename: exportFilename(request.recipe, 'spritesheet', false), mediaType: 'image/png', data: image }],
+            warnings: [],
         }
         const imageBytes = new Uint8Array(await image.arrayBuffer())
         return {
-            files: [{ filename: `${baseName}.zip`, mediaType: 'application/zip', data: await zip({
-                [`${baseName}.png`]: imageBytes,
-                [`${baseName}.json`]: metadataBytes(metadata),
+            files: [{ filename: exportFilename(request.recipe, 'spritesheet'), mediaType: 'application/zip', data: await zip({
+                [`${stem}.png`]: imageBytes,
+                [`${stem}.json`]: metadataBytes(metadata),
             }, options.signal) }],
-            warnings: missingTextureLimitWarning(options),
+            warnings: [],
         }
     } finally {
         session.dispose()

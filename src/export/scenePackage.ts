@@ -1,10 +1,10 @@
 import { strToU8, Zip, ZipPassThrough } from 'fflate'
-import type { ExportRunner } from './contract'
+import { SCENE_PACKAGE_BASE_PASSES, type ExportRunner } from './contract'
+import { exportFilename } from './filenames'
 import { assertPngAdmission } from './png'
 import { composeBand, encodePngBands, throwIfAborted } from './raster'
 import { createExportSession, type ExportFrame } from './runtime'
 import { createBackdropRasterizer, type BackdropRasterizer } from './backdrop'
-import type { AnimatedExportRunOptions } from './animated'
 
 const safeName = (value: string): string => value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
 const FIXED_ZIP_DATE = new Date('2000-01-01T12:00:00.000Z')
@@ -89,7 +89,7 @@ export const exportScenePackage: ExportRunner = async (request, options) => {
     options.onProgress?.({ requestId: request.id, stage: 'preflight', completed: 0, total: 1 })
     assertPngAdmission(request, options)
     options.onProgress?.({ requestId: request.id, stage: 'preflight', completed: 1, total: 1 })
-    const session = await createExportSession(request.recipe, options.backend, { signal: options.signal })
+    const session = await createExportSession(request.recipe, options.gpu, { signal: options.signal })
     try {
         const frameOptions = { requestId: request.id, signal: options.signal, onProgress: options.onProgress }
         const body = await session.renderFrame(request.recipe.body.phase, frameOptions)
@@ -99,13 +99,15 @@ export const exportScenePackage: ExportRunner = async (request, options) => {
             request.recipe.canvas.width,
             request.recipe.canvas.height,
         )
-        const entries: PackageEntry[] = [
-            { name: 'composite.png', data: await encodePass(request, body, 'composite', options, backdrop) },
-            { name: 'body.png', data: await encodePass(request, body, 'body', options, null) },
-            { name: 'background.png', data: await encodePass(request, null, 'background', options, backdrop) },
-            { name: 'silhouette.png', data: await encodePass(request, body, 'mask', options, null) },
-            { name: 'scene.json', data: strToU8(JSON.stringify(request.recipe, null, 2)) },
-        ]
+        const entries: PackageEntry[] = []
+        for (const pass of SCENE_PACKAGE_BASE_PASSES) {
+            const usesBackdrop = pass.mode === 'composite' || pass.mode === 'background'
+            entries.push({
+                name: pass.name,
+                data: await encodePass(request, pass.mode === 'background' ? null : body, pass.mode, options, usesBackdrop ? backdrop : null),
+            })
+        }
+        entries.push({ name: 'scene.json', data: strToU8(JSON.stringify(request.recipe, null, 2)) })
         if (request.includeLayers) {
             for (const layerId of session.visibleLayerIds()) {
                 throwIfAborted(options.signal)
@@ -118,8 +120,8 @@ export const exportScenePackage: ExportRunner = async (request, options) => {
         throwIfAborted(options.signal)
         const data = await createZipBlob(entries, request.id, options.signal, options.onProgress)
         return {
-            files: [{ filename: `${request.recipe.celestialType}-${request.recipe.seed}-scene.zip`, mediaType: 'application/zip', data }],
-            warnings: (options as AnimatedExportRunOptions).preflightLimits ? [] : ['This device limits exports to 2048 pixels per side.'],
+            files: [{ filename: exportFilename(request.recipe, 'scene-package'), mediaType: 'application/zip', data }],
+            warnings: [],
         }
     } finally {
         session.dispose()

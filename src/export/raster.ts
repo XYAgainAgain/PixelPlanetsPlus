@@ -1,6 +1,6 @@
 import { composerBodyToCanvasPixels } from './layout'
 import type { ExportFrame } from './runtime'
-import type { RenderProgress, SceneRecipeV1 } from './types'
+import type { RenderProgress, SceneRecipeV2 } from './types'
 import type { BackdropRasterizer } from './backdrop'
 
 export const BAND_ROWS = 128
@@ -14,18 +14,28 @@ const pngEncodingError = (details: string): Error => Object.assign(
     { cause: new Error(details), details },
 )
 
-const srgbToLinear = (value: number): number => {
-    const normalized = value / 255
-    return normalized <= 0.04045 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4
-}
-
-const linearToSrgb = (value: number): number => {
-    const normalized = Math.max(0, Math.min(1, value))
-    return Math.round(255 * (normalized <= 0.0031308 ? normalized * 12.92 : 1.055 * normalized ** (1 / 2.4) - 0.055))
+/* Source-over on premultiplied, display-encoded 8-bit values, exactly what the browser does when it stacks
+   the live planet canvas over the backdrop. No linearizing: soft edges must match the screen. */
+export const blendOver = (
+    target: Uint8ClampedArray,
+    targetOffset: number,
+    source: ArrayLike<number>,
+    sourceOffset: number,
+): void => {
+    const sourceAlpha = source[sourceOffset + 3]! / 255
+    if (sourceAlpha === 0) return
+    const targetAlpha = target[targetOffset + 3]! / 255
+    const keep = targetAlpha * (1 - sourceAlpha)
+    const alpha = sourceAlpha + keep
+    for (let channel = 0; channel < 3; channel += 1) {
+        const premultiplied = source[sourceOffset + channel]! * sourceAlpha + target[targetOffset + channel]! * keep
+        target[targetOffset + channel] = Math.round(premultiplied / alpha)
+    }
+    target[targetOffset + 3] = Math.round(alpha * 255)
 }
 
 export const composeBand = (
-    recipe: SceneRecipeV1,
+    recipe: SceneRecipeV2,
     body: ExportFrame | null,
     startY: number,
     rowCount: number,
@@ -38,10 +48,11 @@ export const composeBand = (
         : backdropRasterizer?.renderBand(startY, rowCount)
             ?? new Uint8ClampedArray(width * rowCount * 4)
     if (mode === 'background' || !body) return output
-    const placement = composerBodyToCanvasPixels(recipe.body, width, height)
-    const left = Math.round(placement.center[0] - placement.size / 2)
-    const top = Math.round(placement.center[1] - placement.size / 2)
-    const size = Math.max(1, Math.round(placement.size))
+    // Whole-number zoom of the canonical frame: every body texel becomes an exact scale × scale block.
+    const size = body.width * recipe.export.scale
+    const placement = composerBodyToCanvasPixels(recipe.body, size, width, height)
+    const left = Math.round(placement.center[0] - size / 2)
+    const top = Math.round(placement.center[1] - size / 2)
     for (let localY = 0; localY < rowCount; localY += 1) {
         const canvasY = startY + localY
         const sourceY = Math.floor((canvasY - top) * body.height / size)
@@ -50,8 +61,7 @@ export const composeBand = (
             const sourceX = Math.floor((canvasX - left) * body.width / size)
             const sourceOffset = (sourceY * body.width + sourceX) * 4
             const targetOffset = (localY * width + canvasX) * 4
-            const sourceAlpha = body.pixels[sourceOffset + 3]! / 255
-            if (sourceAlpha === 0) continue
+            if (body.pixels[sourceOffset + 3] === 0) continue
             if (mode === 'mask') {
                 output[targetOffset] = 255
                 output[targetOffset + 1] = 255
@@ -59,16 +69,7 @@ export const composeBand = (
                 output[targetOffset + 3] = body.pixels[sourceOffset + 3]!
                 continue
             }
-            const targetAlpha = output[targetOffset + 3]! / 255
-            const alpha = sourceAlpha + targetAlpha * (1 - sourceAlpha)
-            for (let channel = 0; channel < 3; channel += 1) {
-                // Runtime readback is display-ready sRGB because LinearSRGBColorSpace is load-bearing there.
-                const sourceLinear = srgbToLinear(body.pixels[sourceOffset + channel]!)
-                const targetLinear = srgbToLinear(output[targetOffset + channel]!)
-                const premultiplied = sourceLinear * sourceAlpha + targetLinear * targetAlpha * (1 - sourceAlpha)
-                output[targetOffset + channel] = alpha === 0 ? 0 : linearToSrgb(premultiplied / alpha)
-            }
-            output[targetOffset + 3] = Math.round(alpha * 255)
+            blendOver(output, targetOffset, body.pixels, sourceOffset)
         }
     }
     return output

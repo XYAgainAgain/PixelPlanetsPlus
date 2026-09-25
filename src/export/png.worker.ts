@@ -1,4 +1,5 @@
-import { AsyncZlib } from 'fflate'
+// Keeps this file a module so its Request and Response types stay local.
+export {}
 
 type Request =
     | { type: 'start', width: number, height: number }
@@ -16,7 +17,7 @@ type Response =
 const signature = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])
 let width = 0
 let remainingRows = 0
-let deflater: AsyncZlib | null = null
+let deflater: WritableStreamDefaultWriter<BufferSource> | null = null
 let previous: Uint8Array | null = null
 let canceled = false
 
@@ -78,13 +79,35 @@ const filteredRow = (row: Uint8Array): Uint8Array => {
     return candidates[best]!
 }
 
-self.addEventListener('message', (event: MessageEvent<Request>) => {
+const send = (name: string, data: Uint8Array): void => {
+    const bytes = chunk(name, data)
+    reply({ type: 'chunk', chunk: bytes }, [bytes.buffer])
+}
+
+// Emits every compressed piece as its own IDAT, then IEND once the zlib stream closes.
+const drain = async (reader: ReadableStreamDefaultReader<Uint8Array>, writer: WritableStreamDefaultWriter<BufferSource>): Promise<void> => {
+    try {
+        while (true) {
+            const { done, value } = await reader.read()
+            if (canceled || deflater !== writer) return
+            if (done) break
+            if (value.length > 0) send('IDAT', value)
+        }
+        send('IEND', new Uint8Array())
+        reply({ type: 'done' })
+    } catch (error) {
+        if (!canceled && deflater === writer) reply({ type: 'error', message: error instanceof Error ? error.message : String(error) })
+    }
+}
+
+self.addEventListener('message', async (event: MessageEvent<Request>) => {
     try {
         const request = event.data
         if (request.type === 'cancel') {
             canceled = true
-            deflater?.terminate?.()
+            const writer = deflater
             deflater = null
+            await writer?.abort().catch(() => {})
             return
         }
         if (request.type === 'start') {
@@ -101,22 +124,11 @@ self.addEventListener('message', (event: MessageEvent<Request>) => {
             start.set(signature)
             start.set(chunk('IHDR', header), signature.length)
             reply({ type: 'chunk', chunk: start }, [start.buffer])
-            deflater = new AsyncZlib({ level: 6 }, (error, data, final) => {
-                if (canceled) return
-                if (error) {
-                    reply({ type: 'error', message: error.message })
-                    return
-                }
-                if (data.length > 0) {
-                    const idat = chunk('IDAT', data)
-                    reply({ type: 'chunk', chunk: idat }, [idat.buffer])
-                }
-                if (final) {
-                    const end = chunk('IEND', new Uint8Array())
-                    reply({ type: 'chunk', chunk: end }, [end.buffer])
-                    reply({ type: 'done' })
-                }
-            })
+            // The platform's zlib stream: fflate 0.8.3's streaming Zlib emitted invalid distances on long flat runs.
+            const compressor = new CompressionStream('deflate')
+            const writer = compressor.writable.getWriter()
+            deflater = writer
+            void drain(compressor.readable.getReader(), writer)
             reply({ type: 'ready' })
             return
         }
@@ -132,13 +144,13 @@ self.addEventListener('message', (event: MessageEvent<Request>) => {
                 filtered.set(filteredRow(row), rowIndex * (stride + 1))
             }
             remainingRows -= request.rowCount
-            deflater.push(filtered)
+            await deflater.write(filtered)
             reply({ type: 'progress', rows: request.rowCount })
             return
         }
         if (remainingRows !== 0) throw new Error(`PNG encoder is missing ${remainingRows} rows.`)
-        deflater.push(new Uint8Array(), true)
+        await deflater.close()
     } catch (error) {
-        reply({ type: 'error', message: error instanceof Error ? error.message : String(error) })
+        if (!canceled) reply({ type: 'error', message: error instanceof Error ? error.message : String(error) })
     }
 })

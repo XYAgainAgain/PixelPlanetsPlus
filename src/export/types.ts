@@ -11,26 +11,33 @@ export interface ExportEffectV1 {
     parameters: Readonly<Record<string, boolean | number | string>>
 }
 
-export type BackdropV1 =
+export type BackdropBaseV2 =
     | { kind: 'transparent' }
     | { kind: 'solid', color: string }
-    | {
-        kind: 'stars' | 'gradient' | 'stars-gradient'
-        seed: number
-        density: number
-        brightness: number
-        starScale: number
-        specialStarMix: number
-        gradientPhase: number
-    }
+    | { kind: 'gradient', phase: number }
 
-export interface SceneRecipeV1 {
-    schema: 'pixelplanetsplus-scene@1'
+export interface BackdropStarsV2 {
+    seed: number
+    density: number
+    brightness: number
+    starScale: number
+    specialStarMix: number
+}
+
+// An opaque or transparent base with an optional star layer over it, so every pairing exists.
+export interface BackdropV2 {
+    base: BackdropBaseV2
+    stars: BackdropStarsV2 | null
+}
+
+// Planet-first sizing: the body renders at its canonical frame (layout.ts) and is enlarged by the whole-number
+// export.scale, so its size in the file is never a free parameter that could contradict those two.
+export interface SceneRecipeV2 {
+    schema: 'pixelplanetsplus-scene@2'
     celestialType: PlanetTypeId
     canvas: { width: number, height: number }
     body: {
         center: Vec2
-        size: number
         phase: number
         rotation: number
         light: Vec2 | null
@@ -40,7 +47,7 @@ export interface SceneRecipeV1 {
     palette: readonly (readonly string[])[]
     layers: readonly { id: string, visible: boolean }[]
     dither: boolean
-    backdrop: BackdropV1
+    backdrop: BackdropV2
     export: {
         scale: ExportScale
         frameCount: number
@@ -58,7 +65,7 @@ export type ExportFormat = 'png' | 'gif' | 'spritesheet' | 'png-sequence' | 'sce
 
 export interface RenderRequest {
     id: string
-    recipe: SceneRecipeV1
+    recipe: SceneRecipeV2
     format: ExportFormat
     includeMetadata: boolean
     includeLayers: boolean
@@ -85,36 +92,42 @@ export interface RenderResult {
     warnings: readonly string[]
 }
 
-export interface SpritesheetFrameV1 {
-    index: number
-    x: number
-    y: number
-    width: number
-    height: number
-    phase: number
-    durationMilliseconds: number
+export interface BackdropSummaryV2 {
+    base: BackdropBaseV2['kind']
+    stars: boolean
 }
 
-export interface SpritesheetMetadataV1 {
-    schema: 'pixelplanetsplus-spritesheet@1'
+// Cell i shows phase first + i × step; frames are always evenly sampled.
+export interface PhaseRangeV2 {
+    first: number
+    step: number
+}
+
+export interface SpritesheetMetadataV2 {
+    schema: 'pixelplanetsplus-spritesheet@2'
     celestialType: PlanetTypeId
     image: { width: number, height: number }
-    frame: { width: number, height: number, margin: number }
-    grid: { columns: number, rows: number, order: 'left-to-right-top-to-bottom' }
-    playback: { direction: PlaybackDirection, loop: true, framesPerSecond: number, order: readonly number[] }
+    frame: { width: number, height: number }
+    // Cell i sits at x = margin + (i % columns) × (frame.width + margin), y = margin + ⌊i / columns⌋ × (frame.height + margin).
+    grid: { count: number, columns: number, rows: number, margin: number }
+    phases: PhaseRangeV2
+    // order lists cell indices in playback order; it is omitted when cells already play in order.
+    playback: { direction: PlaybackDirection, loop: true, framesPerSecond: number, frameDurationMilliseconds: number, order?: readonly number[] }
     scale: ExportScale
     transparent: boolean
-    backdrop: BackdropV1['kind']
-    frames: readonly SpritesheetFrameV1[]
+    backdrop: BackdropSummaryV2
 }
 
-export interface SequenceMetadataV1 {
-    schema: 'pixelplanetsplus-sequence@1'
+export interface SequenceMetadataV2 {
+    schema: 'pixelplanetsplus-sequence@2'
     celestialType: PlanetTypeId
     frame: { width: number, height: number }
-    playback: { direction: PlaybackDirection, loop: true, framesPerSecond: number }
+    // File i (0-based) is prefix + String(i + 1).padStart(digits, '0') + '.png'.
+    files: { count: number, prefix: string, digits: number }
+    // Ping-Pong revisits phases, so it lists every file's phase instead of a range.
+    phases: PhaseRangeV2 | readonly number[]
+    playback: { direction: PlaybackDirection, loop: true, framesPerSecond: number, frameDurationMilliseconds: number }
     scale: ExportScale
     transparent: boolean
-    backdrop: BackdropV1['kind']
-    frames: readonly { index: number, filename: string, phase: number, durationMilliseconds: number }[]
+    backdrop: BackdropSummaryV2
 }

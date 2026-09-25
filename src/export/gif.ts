@@ -1,5 +1,6 @@
 import type { ExportRunOutput, ExportRunner } from './contract'
-import { canvasPixels, createAnimatedSession, exportBaseName, missingTextureLimitWarning, playbackPhases, throwIfAborted, upscaleFrame, type AnimatedExportRunOptions } from './animated'
+import { animatedFrameSize, canvasPixels, createAnimatedSession, playbackPhases, throwIfAborted, upscaleFrame, type AnimatedExportRunOptions } from './animated'
+import { exportFilename } from './filenames'
 import { distributeGifDelays } from './timing'
 
 type WorkerRequest =
@@ -16,7 +17,7 @@ type WorkerResponse =
     | { type: 'done', bytes: Uint8Array }
     | { type: 'error', message: string }
 
-const workerMessage = (worker: Worker, message: WorkerRequest): Promise<WorkerResponse> => new Promise((resolve, reject) => {
+const workerMessage = (worker: Worker, message: WorkerRequest, transfer: Transferable[] = []): Promise<WorkerResponse> => new Promise((resolve, reject) => {
     const received = (event: MessageEvent<WorkerResponse>) => {
         cleanup()
         if (event.data.type === 'error') reject(new Error(event.data.message))
@@ -32,27 +33,31 @@ const workerMessage = (worker: Worker, message: WorkerRequest): Promise<WorkerRe
     }
     worker.addEventListener('message', received)
     worker.addEventListener('error', failed)
-    worker.postMessage(message)
+    worker.postMessage(message, transfer)
 })
 
 export const exportGif: ExportRunner = async (request, options): Promise<ExportRunOutput> => {
     if (request.format !== 'gif') throw new Error(`GIF export received ${request.format}.`)
-    const { session, backdrop } = await createAnimatedSession(request, options)
-    const worker = new Worker(new URL('./encode.worker.ts', import.meta.url), { type: 'module' })
+    // Everything that can reject the request runs before the session or worker exist, so nothing leaks.
     const phases = playbackPhases(request)
     const delays = distributeGifDelays(request.recipe.export.framesPerSecond, phases.length)
     const scale = request.recipe.export.scale
+    const size = animatedFrameSize(request)
+    const { session, backdrop } = await createAnimatedSession(request, options)
+    let worker: Worker | null = null
 
     try {
+        worker = new Worker(new URL('./encode.worker.ts', import.meta.url), { type: 'module' })
         await workerMessage(worker, {
-            type: 'gif-start', width: session.width * scale, height: session.height * scale,
-            transparent: request.recipe.backdrop.kind === 'transparent'
+            type: 'gif-start', width: size, height: size,
+            transparent: request.recipe.backdrop.base.kind === 'transparent'
                 && (options as AnimatedExportRunOptions).oneBitTransparency !== false,
         })
         for (let index = 0; index < phases.length; index += 1) {
             throwIfAborted(options.signal)
             const frame = await session.renderFrame(phases[index]!, { requestId: request.id, signal: options.signal })
-            await workerMessage(worker, { type: 'gif-sample', rgba: canvasPixels(upscaleFrame(frame, scale, backdrop)) })
+            const rgba = canvasPixels(upscaleFrame(frame, scale, backdrop))
+            await workerMessage(worker, { type: 'gif-sample', rgba }, [rgba.buffer])
             options.onProgress?.({ requestId: request.id, stage: 'palette', completed: index + 1, total: phases.length })
         }
         throwIfAborted(options.signal)
@@ -60,9 +65,8 @@ export const exportGif: ExportRunner = async (request, options): Promise<ExportR
         for (let index = 0; index < phases.length; index += 1) {
             throwIfAborted(options.signal)
             const frame = await session.renderFrame(phases[index]!, { requestId: request.id, signal: options.signal })
-            await workerMessage(worker, {
-                type: 'gif-frame', rgba: canvasPixels(upscaleFrame(frame, scale, backdrop)), delay: delays[index]!,
-            })
+            const rgba = canvasPixels(upscaleFrame(frame, scale, backdrop))
+            await workerMessage(worker, { type: 'gif-frame', rgba, delay: delays[index]! }, [rgba.buffer])
             options.onProgress?.({ requestId: request.id, stage: 'encode', completed: index + 1, total: phases.length })
         }
         throwIfAborted(options.signal)
@@ -71,11 +75,11 @@ export const exportGif: ExportRunner = async (request, options): Promise<ExportR
         const bytes = new Uint8Array(response.bytes.byteLength)
         bytes.set(response.bytes)
         return {
-            files: [{ filename: `${exportBaseName(request)}.gif`, mediaType: 'image/gif', data: new Blob([bytes.buffer], { type: 'image/gif' }) }],
-            warnings: missingTextureLimitWarning(options),
+            files: [{ filename: exportFilename(request.recipe, 'gif'), mediaType: 'image/gif', data: new Blob([bytes.buffer], { type: 'image/gif' }) }],
+            warnings: [],
         }
     } finally {
-        worker.terminate()
+        worker?.terminate()
         session.dispose()
     }
 }

@@ -156,8 +156,6 @@ body.ca-off h1 {
 }
 
 .export-drag-handle {
-  --export-drag-x: 0px;
-  --export-drag-y: 0px;
   position: absolute;
   z-index: 2;
   border: 1px solid color-mix(in srgb, var(--color-indigo-300) 75%, transparent);
@@ -165,8 +163,7 @@ body.ca-off h1 {
   background: color-mix(in srgb, var(--color-indigo-500) 16%, transparent);
   cursor: grab;
   touch-action: none;
-  transform: translate(-50%, -50%) translate3d(var(--export-drag-x), var(--export-drag-y), 0);
-  will-change: transform;
+  translate: -50% -50%;
 }
 
 .export-drag-handle:active {
